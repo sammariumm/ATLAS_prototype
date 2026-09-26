@@ -1,17 +1,28 @@
-# app_prototype
+# ATLAS Prototype
 
-A new Flutter project.
+Current Software prototype of ATLAS.
 
-## Getting Started
+## Prerequisites
 
-This project is a starting point for a Flutter application.
+- [] Git
+- [] Flutter SDK (installed and added to system PATH)
+- [] VSCode (with Flutter and Dart extensions installed)
+- [] Visual Studio 2022 Build Tools (with "Desktop development with C++" workload) - *Required for Windows builds*
 
-A few resources to get you started if this is your first Flutter project:
+## Cloning to your local system
 
-- [Learn Flutter](https://docs.flutter.dev/get-started/learn-flutter)
-- [Write your first Flutter app](https://docs.flutter.dev/get-started/codelab)
-- [Flutter learning resources](https://docs.flutter.dev/reference/learning-resources)
+Choose the directory where you want to clone the repository. Open the git terminal / vscode terminal in that directory, and execute these commands:
 
-For help getting started with Flutter development, view the
-[online documentation](https://docs.flutter.dev/), which offers tutorials,
-samples, guidance on mobile development, and a full API reference.
+```bash
+# clone the repo
+git clone https://github.com/sammariumm/ATLAS_prototype
+
+# cd into the repo's directory
+cd ATLAS_prototype
+
+# install dependencies
+flutter pub get
+
+# build and run the app
+flutter run
+```
