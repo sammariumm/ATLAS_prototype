@@ -1,5 +1,8 @@
+import 'dart:io';
 import 'package:flutter/material.dart';
 import 'package:camera/camera.dart';
+import 'package:flutter/foundation.dart' show kIsWeb;
+import 'package:sqflite_common_ffi/sqflite_ffi.dart';
 
 import 'panels/camera_panel.dart';
 import 'panels/results_panel.dart';
@@ -9,6 +12,12 @@ List<CameraDescription> cameras = [];
 
 Future<void> main() async {
   WidgetsFlutterBinding.ensureInitialized();
+  
+  if (!kIsWeb && (Platform.isWindows || Platform.isLinux)) {
+    sqfliteFfiInit();
+    databaseFactory = databaseFactoryFfi;
+  }
+
   try {
     cameras = await availableCameras();
   } catch (e) {
@@ -31,16 +40,12 @@ class AtlasBcApp extends StatelessWidget {
         appBarTheme: const AppBarTheme(
           backgroundColor: Color(0xFF134E4A),
           centerTitle: true,
-          titleTextStyle: TextStyle(
-            color: Colors.white,
-            fontSize: 20,
-            fontWeight: FontWeight.bold,
-          ),
+          titleTextStyle: TextStyle(color: Colors.white, fontSize: 20, fontWeight: FontWeight.bold),
           iconTheme: IconThemeData(color: Colors.white),
         ),
       ),
       home: const Scaffold(
-        backgroundColor: Colors.black,
+        backgroundColor: Colors.black, 
         body: Center(
           child: SizedBox(
             width: 480,
@@ -63,29 +68,26 @@ class MainLayout extends StatefulWidget {
 class _MainLayoutState extends State<MainLayout> {
   int _currentIndex = 0;
   final List<Map<String, dynamic>> _scanData = [];
-
+  
   int _scanCounter = 1;
   String? _currentScanId;
-
+  
   bool _isProcessingAI = false;
 
   Map<String, String>? _aiLeftResult;
   Map<String, String>? _aiRightResult;
   Map<String, String>? _aiCombinedResult;
 
-  // New Patient logic: clears all state data completely
   void _startNewPatient() {
     showDialog(
       context: context,
       builder: (context) => AlertDialog(
         title: const Text('Start New Patient?'),
-        content: const Text(
-          'This will clear all current unsaved images and AI results. Continue?',
-        ),
+        content: const Text('This will clear all current unsaved images and AI results. Continue?'),
         actions: [
           TextButton(
-            onPressed: () => Navigator.pop(context),
-            child: const Text('Cancel', style: TextStyle(color: Colors.grey)),
+            onPressed: () => Navigator.pop(context), 
+            child: const Text('Cancel', style: TextStyle(color: Colors.grey))
           ),
           TextButton(
             onPressed: () {
@@ -97,25 +99,15 @@ class _MainLayoutState extends State<MainLayout> {
                 _aiLeftResult = null;
                 _aiRightResult = null;
                 _aiCombinedResult = null;
-                // Next capture will auto-generate a new ID
               });
               ScaffoldMessenger.of(context).showSnackBar(
-                const SnackBar(
-                  content: Text('New patient profile started.'),
-                  backgroundColor: Color(0xFF0D9488),
-                ),
+                const SnackBar(content: Text('New patient profile started.'), backgroundColor: Color(0xFF0D9488)),
               );
             },
-            child: const Text(
-              'Start New',
-              style: TextStyle(
-                color: Color(0xFF0D9488),
-                fontWeight: FontWeight.bold,
-              ),
-            ),
+            child: const Text('Start New', style: TextStyle(color: Color(0xFF0D9488), fontWeight: FontWeight.bold)),
           ),
         ],
-      ),
+      )
     );
   }
 
@@ -125,13 +117,11 @@ class _MainLayoutState extends State<MainLayout> {
       CameraPanel(
         cameras: cameras,
         scanData: _scanData,
-        // Reset current scans logic
         onReset: () => setState(() => _scanData.clear()),
         onImageCaptured: (image, side, view) async {
           setState(() {
             if (_scanData.isEmpty) {
-              _currentScanId =
-                  'SCAN-${_scanCounter.toString().padLeft(4, '0')}';
+              _currentScanId = 'SCAN-${_scanCounter.toString().padLeft(4, '0')}';
               _scanCounter++;
             }
             _scanData.add({'image': image, 'side': side, 'view': view});
@@ -139,7 +129,7 @@ class _MainLayoutState extends State<MainLayout> {
 
           if (_scanData.length >= 2) {
             setState(() {
-              _currentIndex = 1;
+              _currentIndex = 1; 
               _isProcessingAI = true;
             });
             await Future.delayed(const Duration(seconds: 2));
@@ -147,39 +137,24 @@ class _MainLayoutState extends State<MainLayout> {
             if (mounted) {
               setState(() {
                 _isProcessingAI = false;
-                _aiLeftResult = {
-                  'classification': 'BI-RADS 1',
-                  'confidence': '95%',
-                  'recommendation': 'Negative. Routine screening.',
-                };
-                _aiRightResult = {
-                  'classification': 'BI-RADS 4',
-                  'confidence': '88%',
-                  'recommendation': 'Suspicious abnormality.',
-                };
-                _aiCombinedResult = {
-                  'classification': 'BI-RADS 4',
-                  'confidence': '88%',
-                  'recommendation': 'Biopsy recommended for the Right breast based on bilateral analysis.',
-                };
+                _aiLeftResult = {'classification': 'BI-RADS 1', 'confidence': '95%', 'recommendation': 'Negative. Routine screening.'};
+                _aiRightResult = {'classification': 'BI-RADS 4', 'confidence': '88%', 'recommendation': 'Suspicious abnormality.'};
+                _aiCombinedResult = {'classification': 'BI-RADS 4', 'confidence': '88%', 'recommendation': 'Biopsy recommended for the Right breast based on bilateral analysis.'};
               });
             }
           } else {
             ScaffoldMessenger.of(context).showSnackBar(
-              SnackBar(
-                content: Text(
-                  'Captured $side Breast. Please capture the other side.',
-                ),
-                backgroundColor: const Color(0xFF0D9488),
-              ),
+              SnackBar(content: Text('Captured $side Breast. Please capture the other side.'), backgroundColor: const Color(0xFF0D9488)),
             );
           }
         },
       ),
       ResultsPanel(
         scanData: _scanData,
-        scanId: _currentScanId,
+        scanId: _currentScanId, 
         isProcessing: _isProcessingAI,
+        leftResult: _aiLeftResult,
+        rightResult: _aiRightResult,
         combinedResult: _aiCombinedResult,
       ),
       ExportPanel(
@@ -208,11 +183,7 @@ class _MainLayoutState extends State<MainLayout> {
         onTap: (index) {
           if (index != 0 && _scanData.length < 2) {
             ScaffoldMessenger.of(context).showSnackBar(
-              const SnackBar(
-                content: Text(
-                  'Please complete both Left and Right scans first.',
-                ),
-              ),
+              const SnackBar(content: Text('Please complete both Left and Right scans first.')),
             );
             return;
           }
@@ -221,18 +192,9 @@ class _MainLayoutState extends State<MainLayout> {
         selectedItemColor: const Color(0xFF0D9488),
         unselectedItemColor: const Color(0xFF94A3B8),
         items: const [
-          BottomNavigationBarItem(
-            icon: Icon(Icons.camera_alt_outlined),
-            label: 'Camera',
-          ),
-          BottomNavigationBarItem(
-            icon: Icon(Icons.description_outlined),
-            label: 'Results',
-          ),
-          BottomNavigationBarItem(
-            icon: Icon(Icons.download_outlined),
-            label: 'Export',
-          ),
+          BottomNavigationBarItem(icon: Icon(Icons.camera_alt_outlined), label: 'Camera'),
+          BottomNavigationBarItem(icon: Icon(Icons.description_outlined), label: 'Results'),
+          BottomNavigationBarItem(icon: Icon(Icons.download_outlined), label: 'Export'),
         ],
       ),
     );

@@ -1,11 +1,13 @@
 import 'dart:io';
 import 'package:flutter/material.dart';
 import 'package:flutter/foundation.dart' show kIsWeb;
-import '../../services/backend_service.dart';
+import '../services/backend_service.dart';
 
 class ResultsPanel extends StatefulWidget {
   final List<Map<String, dynamic>> scanData;
   final String? scanId;
+  final Map<String, String>? leftResult;
+  final Map<String, String>? rightResult;
   final Map<String, String>? combinedResult;
   final bool isProcessing;
 
@@ -13,6 +15,8 @@ class ResultsPanel extends StatefulWidget {
     super.key,
     required this.scanData,
     this.scanId,
+    this.leftResult,
+    this.rightResult,
     this.combinedResult,
     this.isProcessing = false,
   });
@@ -52,17 +56,28 @@ class _ResultsPanelState extends State<ResultsPanel> {
 
     try {
       if (_isAccurate == true) {
-        await BackendService.sendToBlockchain(
+        // Now passes Left, Right, and Combined results
+        await BackendService.saveScanRecord(
           scanId: widget.scanId!,
           scanData: widget.scanData,
-          combinedClassification: widget.combinedResult?['classification'] ?? 'Unknown',
+          leftResult: widget.leftResult,
+          rightResult: widget.rightResult,
+          combinedResult: widget.combinedResult,
           isAccurate: _isAccurate!,
         );
       }
-      await BackendService.saveToDatabase(scanId: widget.scanId!, physicianName: 'Doctor', email: null);
-      if (mounted) ScaffoldMessenger.of(context).showSnackBar(const SnackBar(content: Text('Combined Result submitted!'), backgroundColor: Color(0xFF0D9488)));
+      
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          const SnackBar(content: Text('Record successfully saved to Databases!'), backgroundColor: Color(0xFF0D9488))
+        );
+      }
     } catch (e) {
-      debugPrint('$e');
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+           SnackBar(content: Text('Database Error: $e'), backgroundColor: const Color(0xFFE11D48))
+        );
+      }
     } finally {
       if (mounted) setState(() => _isSubmitting = false);
     }
@@ -164,7 +179,7 @@ class _ResultsPanelState extends State<ResultsPanel> {
                   child: Container(
                     padding: const EdgeInsets.symmetric(vertical: 16),
                     decoration: BoxDecoration(color: _isAccurate == true ? const Color(0xFFE6FFFA) : Colors.white, border: Border.all(color: _isAccurate == true ? const Color(0xFF0D9488) : const Color(0xFFE2E8F0), width: 2), borderRadius: BorderRadius.circular(8)),
-                    child: Column(children: const [Text('Accurate', style: TextStyle(fontWeight: FontWeight.bold, fontSize: 16, color: Color(0xFF0F172A))), Text('Send to Blockchain', style: TextStyle(color: Color(0xFF0D9488), fontSize: 10))]),
+                    child: Column(children: const [Text('Accurate', style: TextStyle(fontWeight: FontWeight.bold, fontSize: 16, color: Color(0xFF0F172A))), Text('Save to Database', style: TextStyle(color: Color(0xFF0D9488), fontSize: 10))]),
                   ),
                 ),
               ),

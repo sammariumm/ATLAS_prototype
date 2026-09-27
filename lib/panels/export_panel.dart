@@ -4,7 +4,7 @@ import 'package:path_provider/path_provider.dart';
 import 'package:pdf/pdf.dart';
 import 'package:pdf/widgets.dart' as pw;
 import 'package:flutter/foundation.dart' show kIsWeb;
-import '../../services/backend_service.dart';
+import '../services/backend_service.dart';
 
 class ExportPanel extends StatefulWidget {
   final List<Map<String, dynamic>> scanData;

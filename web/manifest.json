@@ -1,6 +1,6 @@
 {
-    "name": "app_prototype",
-    "short_name": "app_prototype",
+    "name": "atlas_bc",
+    "short_name": "atlas_bc",
     "start_url": ".",
     "display": "standalone",
     "background_color": "#0175C2",
