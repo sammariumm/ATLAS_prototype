@@ -1,3 +1,4 @@
+<<<<<<< Updated upstream
 name: app_prototype
 description: "A new Flutter project."
 # The following line prevents the package from being accidentally published to
@@ -16,10 +17,15 @@ publish_to: 'none' # Remove this line if you wish to publish to pub.dev
 # https://developer.apple.com/library/archive/documentation/General/Reference/InfoPlistKeyReference/Articles/CoreFoundationKeys.html
 # In Windows, build-name is used as the major, minor, and patch parts
 # of the product and file versions while build-number is used as the build suffix.
+=======
+name: atlas_bc
+description: ATLAS-BC Mammography AI Offline System
+publish_to: 'none'
+>>>>>>> Stashed changes
 version: 1.0.0+1
 
 environment:
-  sdk: ^3.13.4
+  sdk: '>=3.0.0 <4.0.0'
 
 # Dependencies specify other packages that your package needs in order to work.
 # To automatically upgrade your package dependencies to the latest versions
@@ -34,10 +40,21 @@ dependencies:
   # The following adds the Cupertino Icons font to your application.
   # Use with the CupertinoIcons class for iOS style icons.
   cupertino_icons: ^1.0.8
+<<<<<<< Updated upstream
   camera: ^0.12.1
   path_provider: ^2.1.6
   pdf: ^3.13.1
   mailer: ^7.2.0
+=======
+  http: ^0.13.6
+  flutter_mjpeg: ^2.0.4
+  path_provider: ^2.1.2
+  sqflite: ^2.3.0
+  sqflite_common_ffi: ^2.3.3
+  path: ^1.9.0
+  pdf: ^3.11.0      # For generating the 3-section report
+  mailer: ^6.1.1    # For sending the email via SMTP
+>>>>>>> Stashed changes
 
 dev_dependencies:
   flutter_test:

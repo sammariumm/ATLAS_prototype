@@ -16,6 +16,7 @@ analyzer:
     - ios/**
     - web/**
     - windows/**
+<<<<<<< Updated upstream
     - macos/**
     - linux/**
 
@@ -36,3 +37,8 @@ linter:
 
 # Additional information about this file can be found at
 # https://dart.dev/guides/language/analysis-options
+=======
+    - android/**
+    - ios/**
+    - macos/**
+>>>>>>> Stashed changes

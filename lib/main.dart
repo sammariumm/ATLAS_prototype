@@ -1,19 +1,31 @@
 import 'package:flutter/material.dart';
+<<<<<<< Updated upstream
 import 'package:camera/camera.dart';
+=======
+import 'package:sqflite_common_ffi/sqflite_ffi.dart';
+>>>>>>> Stashed changes
 
 import 'panels/camera_panel.dart';
 import 'panels/results_panel.dart';
 import 'panels/export_panel.dart';
+import 'services/database_helper.dart';
 
-List<CameraDescription> cameras = [];
-
-Future<void> main() async {
+void main() async {
   WidgetsFlutterBinding.ensureInitialized();
+<<<<<<< Updated upstream
   try {
     cameras = await availableCameras();
   } catch (e) {
     debugPrint('Error initializing cameras: $e');
   }
+=======
+  
+  if (Platform.isWindows || Platform.isLinux) {
+    sqfliteFfiInit();
+    databaseFactory = databaseFactoryFfi;
+  }
+
+>>>>>>> Stashed changes
   runApp(const AtlasBcApp());
 }
 
@@ -28,6 +40,7 @@ class AtlasBcApp extends StatelessWidget {
       theme: ThemeData(
         scaffoldBackgroundColor: const Color(0xFFF8FAFC),
         primaryColor: const Color(0xFF134E4A),
+<<<<<<< Updated upstream
         appBarTheme: const AppBarTheme(
           backgroundColor: Color(0xFF134E4A),
           centerTitle: true,
@@ -41,10 +54,15 @@ class AtlasBcApp extends StatelessWidget {
       ),
       home: const Scaffold(
         backgroundColor: Colors.black,
+=======
+      ),
+      home: const Scaffold(
+        backgroundColor: Colors.black87,
+>>>>>>> Stashed changes
         body: Center(
           child: SizedBox(
-            width: 480,
-            height: 800,
+            width: 480, 
+            height: 800, 
             child: ClipRect(child: MainLayout()),
           ),
         ),
@@ -63,16 +81,22 @@ class MainLayout extends StatefulWidget {
 class _MainLayoutState extends State<MainLayout> {
   int _currentIndex = 0;
   final List<Map<String, dynamic>> _scanData = [];
+<<<<<<< Updated upstream
 
   int _scanCounter = 1;
   String? _currentScanId;
 
   bool _isProcessingAI = false;
+=======
+  int _scanCounter = 1;
+  String _currentScanId = 'SCAN-0001'; // Default, gets updated in initState
+>>>>>>> Stashed changes
 
   Map<String, String>? _aiLeftResult;
   Map<String, String>? _aiRightResult;
   Map<String, String>? _aiCombinedResult;
 
+<<<<<<< Updated upstream
   // New Patient logic: clears all state data completely
   void _startNewPatient() {
     showDialog(
@@ -117,14 +141,70 @@ class _MainLayoutState extends State<MainLayout> {
         ],
       ),
     );
+=======
+  @override
+  void initState() {
+    super.initState();
+    _loadLastScanId();
+  }
+
+  Future<void> _loadLastScanId() async {
+    try {
+      final lastScanId = await DatabaseHelper.instance.getLastScanId();
+      if (lastScanId != null && lastScanId.startsWith('SCAN-')) {
+        final numericString = lastScanId.substring(5);
+        final lastCount = int.tryParse(numericString);
+        
+        if (lastCount != null) {
+          setState(() {
+            _scanCounter = lastCount + 1; 
+            _currentScanId = 'SCAN-${_scanCounter.toString().padLeft(4, '0')}';
+          });
+        }
+      }
+    } catch (e) {
+      debugPrint('Could not load previous Scan ID: $e');
+    }
+  }
+
+  void _resetSession() {
+    setState(() {
+      _scanData.clear();
+      _aiLeftResult = null;
+      _aiRightResult = null;
+      _aiCombinedResult = null;
+      _currentIndex = 0; 
+      
+      // Advance counter to prevent overwriting discarded patient folders
+      _scanCounter++;
+      _currentScanId = 'SCAN-${_scanCounter.toString().padLeft(4, '0')}';
+    });
+  }
+
+  void _handleImageCaptured(String imagePath, String side, String view, Map<String, String> aiResult) {
+    setState(() {
+      _scanData.add({'image_path': imagePath, 'side': side, 'view': view});
+      if (side == 'Left') _aiLeftResult = aiResult;
+      if (side == 'Right') _aiRightResult = aiResult;
+
+      if (_scanData.length >= 2) {
+        _aiCombinedResult = {
+          'classification': (_aiLeftResult?['classification'] == 'BI-RADS 4' || _aiRightResult?['classification'] == 'BI-RADS 4') ? 'BI-RADS 4' : 'BI-RADS 1',
+          'confidence': _aiRightResult?['confidence'] ?? '90%',
+          'recommendation': 'Mock bilateral analysis complete. Consult healthcare provider for next steps.',
+        };
+        _currentIndex = 1; 
+      }
+    });
+>>>>>>> Stashed changes
   }
 
   @override
   Widget build(BuildContext context) {
     final List<Widget> panels = [
       CameraPanel(
-        cameras: cameras,
         scanData: _scanData,
+<<<<<<< Updated upstream
         // Reset current scans logic
         onReset: () => setState(() => _scanData.clear()),
         onImageCaptured: (image, side, view) async {
@@ -175,12 +255,23 @@ class _MainLayoutState extends State<MainLayout> {
             );
           }
         },
+=======
+        currentScanId: _currentScanId, // NEW: Passing the ID to the camera
+        onImageCaptured: _handleImageCaptured,
+        onReset: _resetSession,
+>>>>>>> Stashed changes
       ),
       ResultsPanel(
         scanData: _scanData,
         scanId: _currentScanId,
+<<<<<<< Updated upstream
         isProcessing: _isProcessingAI,
+=======
+        leftResult: _aiLeftResult,
+        rightResult: _aiRightResult,
+>>>>>>> Stashed changes
         combinedResult: _aiCombinedResult,
+        onNewPatient: _resetSession,
       ),
       ExportPanel(
         scanData: _scanData,
@@ -188,21 +279,13 @@ class _MainLayoutState extends State<MainLayout> {
         leftResult: _aiLeftResult,
         rightResult: _aiRightResult,
         combinedResult: _aiCombinedResult,
+        onNewPatient: _resetSession,
       ),
     ];
 
     return Scaffold(
-      appBar: AppBar(
-        title: const Text('ATLAS-BC'),
-        actions: [
-          IconButton(
-            icon: const Icon(Icons.person_add_alt_1),
-            tooltip: 'New Patient',
-            onPressed: _startNewPatient,
-          ),
-        ],
-      ),
       body: IndexedStack(index: _currentIndex, children: panels),
+<<<<<<< Updated upstream
       bottomNavigationBar: BottomNavigationBar(
         currentIndex: _currentIndex,
         onTap: (index) {
@@ -234,6 +317,24 @@ class _MainLayoutState extends State<MainLayout> {
             label: 'Export',
           ),
         ],
+=======
+      bottomNavigationBar: SizedBox(
+        height: 70, 
+        child: BottomNavigationBar(
+          currentIndex: _currentIndex,
+          onTap: (index) => setState(() => _currentIndex = index),
+          selectedItemColor: const Color(0xFF0D9488),
+          unselectedItemColor: const Color(0xFF94A3B8),
+          iconSize: 28,
+          selectedFontSize: 12,
+          unselectedFontSize: 12,
+          items: const [
+            BottomNavigationBarItem(icon: Icon(Icons.camera_alt), label: 'Camera'),
+            BottomNavigationBarItem(icon: Icon(Icons.analytics), label: 'Results'),
+            BottomNavigationBarItem(icon: Icon(Icons.picture_as_pdf), label: 'Export'),
+          ],
+        ),
+>>>>>>> Stashed changes
       ),
     );
   }
