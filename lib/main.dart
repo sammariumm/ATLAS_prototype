@@ -1,28 +1,16 @@
 import 'package:flutter/material.dart';
-import 'dart:io';
-import 'package:camera/camera.dart';
 
 import 'panels/camera_panel.dart';
-import 'panels/results_panel.dart';
 import 'panels/export_panel.dart';
+import 'panels/results_panel.dart';
 
-List<CameraDescription> cameras = [];
-
+/// ATLAS-BC entry point (Raspberry Pi / edge deployment).
 Future<void> main() async {
   WidgetsFlutterBinding.ensureInitialized();
-  try {
-    // Only call availableCameras() if NOT running on Linux desktop
-    if (!Platform.isLinux) {
-      cameras = await availableCameras();
-    } else {
-      debugPrint('Running on Linux: Bypassing native camera initialization.');
-    }
-  } catch (e) {
-    debugPrint('Error initializing cameras: $e');
-  }
   runApp(const AtlasBcApp());
 }
 
+/// Root Material app with ATLAS-BC theme and phone-sized demo frame.
 class AtlasBcApp extends StatelessWidget {
   const AtlasBcApp({super.key});
 
@@ -59,6 +47,7 @@ class AtlasBcApp extends StatelessWidget {
   }
 }
 
+/// Three-step workflow: capture both breasts → validate AI → export PDF/email.
 class MainLayout extends StatefulWidget {
   const MainLayout({super.key});
 
@@ -79,7 +68,7 @@ class _MainLayoutState extends State<MainLayout> {
   Map<String, String>? _aiRightResult;
   Map<String, String>? _aiCombinedResult;
 
-  // New Patient logic: clears all state data completely
+  /// Clears the in-memory session for the next patient.
   void _startNewPatient() {
     showDialog(
       context: context,
@@ -99,11 +88,11 @@ class _MainLayoutState extends State<MainLayout> {
               setState(() {
                 _scanData.clear();
                 _currentIndex = 0;
+                _currentScanId = null;
                 _isProcessingAI = false;
                 _aiLeftResult = null;
                 _aiRightResult = null;
                 _aiCombinedResult = null;
-                // Next capture will auto-generate a new ID
               });
               ScaffoldMessenger.of(context).showSnackBar(
                 const SnackBar(
@@ -125,22 +114,86 @@ class _MainLayoutState extends State<MainLayout> {
     );
   }
 
+  /// Assigns `_currentScanId` before the user opens the live preview.
+  void _ensureScanId() {
+    if (_currentScanId != null) return;
+    setState(() {
+      _currentScanId = 'SCAN-${_scanCounter.toString().padLeft(4, '0')}';
+      _scanCounter++;
+    });
+  }
+
+  Map<String, String> _resultFromScan(Map<String, dynamic> scan) {
+    return {
+      'classification': scan['classification']?.toString() ?? '--',
+      'confidence': scan['confidence']?.toString() ?? '--',
+      'recommendation': scan['recommendation']?.toString() ?? '',
+    };
+  }
+
+  /// Uses the higher BI-RADS number as the bilateral summary (prototype rule).
+  Map<String, String>? _combineBilateral(
+    Map<String, String>? left,
+    Map<String, String>? right,
+  ) {
+    if (left == null || right == null) return null;
+
+    int score(String? label) {
+      if (label == null) return 0;
+      final match = RegExp(r'(\d+)').firstMatch(label);
+      return match != null ? int.parse(match.group(1)!) : 0;
+    }
+
+    final dominant =
+        score(right['classification']) >= score(left['classification'])
+            ? right
+            : left;
+    final other = dominant == right ? left : right;
+
+    return {
+      'classification': dominant['classification'] ?? '--',
+      'confidence': dominant['confidence'] ?? '--',
+      'recommendation': dominant['recommendation']?.isNotEmpty == true
+          ? dominant['recommendation']!
+          : 'Dominant finding: ${dominant['classification']}. '
+              'Contralateral: ${other['classification']}.',
+    };
+  }
+
+  void _refreshAiSummaries() {
+    Map<String, String>? left;
+    Map<String, String>? right;
+    for (final scan in _scanData) {
+      if (scan['side'] == 'Left') left = _resultFromScan(scan);
+      if (scan['side'] == 'Right') right = _resultFromScan(scan);
+    }
+    _aiLeftResult = left;
+    _aiRightResult = right;
+    _aiCombinedResult = _combineBilateral(left, right);
+  }
+
   @override
   Widget build(BuildContext context) {
     final List<Widget> panels = [
       CameraPanel(
         scanData: _scanData,
-        currentScanId: _currentScanId, // <--- Added this required parameter
-        onReset: () => setState(() => _scanData.clear()),
-        onImageCaptured: (imagePath, side, view, aiResult) async { // <--- Updated parameters to accept aiResult
+        currentScanId: _currentScanId,
+        onEnsureScanId: _ensureScanId,
+        onReset: () => setState(() {
+          _scanData.clear();
+          _currentScanId = null;
+          _aiLeftResult = null;
+          _aiRightResult = null;
+          _aiCombinedResult = null;
+        }),
+        onImageCaptured: (imagePath, side, view, aiResult) async {
           setState(() {
-            if (_scanData.isEmpty) {
-              _currentScanId =
-                  'SCAN-${_scanCounter.toString().padLeft(4, '0')}';
-              _scanCounter++;
-            }
-            // Save the captured file path and scan info
-            _scanData.add({'image': imagePath, 'side': side, 'view': view});
+            _scanData.add({
+              'image_path': imagePath,
+              'side': side,
+              'view': view,
+              ...aiResult,
+            });
           });
 
           if (_scanData.length >= 2) {
@@ -148,26 +201,18 @@ class _MainLayoutState extends State<MainLayout> {
               _currentIndex = 1;
               _isProcessingAI = true;
             });
-            await Future.delayed(const Duration(seconds: 2));
-
+            await Future.delayed(const Duration(milliseconds: 800));
             if (mounted) {
               setState(() {
                 _isProcessingAI = false;
-                // You can assign your AI results here or use the aiResult passed from the panel
-                _aiLeftResult = aiResult; 
-                _aiRightResult = aiResult;
-                _aiCombinedResult = {
-                  'classification': 'BI-RADS 4',
-                  'confidence': '88%',
-                  'recommendation': 'Biopsy recommended for the Right breast based on bilateral analysis.',
-                };
+                _refreshAiSummaries();
               });
             }
-          } else {
+          } else if (mounted) {
             ScaffoldMessenger.of(context).showSnackBar(
               SnackBar(
                 content: Text(
-                  'Captured $side Breast. Please capture the other side.',
+                  'Captured $side breast. Please capture the other side.',
                 ),
                 backgroundColor: const Color(0xFF0D9488),
               ),
@@ -209,7 +254,7 @@ class _MainLayoutState extends State<MainLayout> {
             ScaffoldMessenger.of(context).showSnackBar(
               const SnackBar(
                 content: Text(
-                  'Please complete both Left and Right scans first.',
+                  'Please complete both left and right scans first.',
                 ),
               ),
             );

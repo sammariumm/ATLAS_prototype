@@ -1,11 +1,14 @@
 import 'dart:io';
+
+import 'package:flutter/foundation.dart' show kIsWeb;
 import 'package:flutter/material.dart';
 import 'package:path_provider/path_provider.dart';
 import 'package:pdf/pdf.dart';
 import 'package:pdf/widgets.dart' as pw;
-import 'package:flutter/foundation.dart' show kIsWeb;
-import '../../services/backend_service.dart';
 
+import '../services/backend_service.dart';
+
+/// Builds a three-section PDF and emails it through [BackendService].
 class ExportPanel extends StatefulWidget {
   final List<Map<String, dynamic>> scanData;
   final String? scanId;
@@ -56,8 +59,14 @@ class _ExportPanelState extends State<ExportPanel> {
       final rightScan = widget.scanData.firstWhere((s) => s['side'] == 'Right', orElse: () => {});
 
       pw.MemoryImage? leftImg, rightImg;
-      if (leftScan.isNotEmpty && leftScan['image'].path.isNotEmpty) leftImg = pw.MemoryImage(await leftScan['image'].readAsBytes());
-      if (rightScan.isNotEmpty && rightScan['image'].path.isNotEmpty) rightImg = pw.MemoryImage(await rightScan['image'].readAsBytes());
+      final leftPath = leftScan['image_path'] as String? ?? '';
+      final rightPath = rightScan['image_path'] as String? ?? '';
+      if (leftPath.isNotEmpty) {
+        leftImg = pw.MemoryImage(await File(leftPath).readAsBytes());
+      }
+      if (rightPath.isNotEmpty) {
+        rightImg = pw.MemoryImage(await File(rightPath).readAsBytes());
+      }
 
       pdf.addPage(
         pw.MultiPage(
