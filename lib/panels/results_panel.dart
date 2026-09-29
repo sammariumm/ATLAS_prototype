@@ -1,8 +1,11 @@
 import 'dart:io';
-import 'package:flutter/material.dart';
-import 'package:flutter/foundation.dart' show kIsWeb;
-import '../../services/backend_service.dart';
 
+import 'package:flutter/foundation.dart' show kIsWeb;
+import 'package:flutter/material.dart';
+
+import '../services/backend_service.dart';
+
+/// Shows bilateral thumbnails, combined AI output, and physician validation.
 class ResultsPanel extends StatefulWidget {
   final List<Map<String, dynamic>> scanData;
   final String? scanId;
@@ -24,6 +27,10 @@ class ResultsPanel extends StatefulWidget {
 class _ResultsPanelState extends State<ResultsPanel> {
   bool? _isAccurate;
   bool _isSubmitting = false;
+
+  String _imagePath(Map<String, dynamic> scan) {
+    return scan['image_path'] as String? ?? '';
+  }
 
   void _showEnlargedImage(String path) {
     if (path.isEmpty) return;
@@ -87,15 +94,15 @@ class _ResultsPanelState extends State<ResultsPanel> {
                     child: Padding(
                       padding: EdgeInsets.only(right: i == 0 ? 8.0 : 0.0),
                       child: GestureDetector(
-                        onTap: (i < widget.scanData.length && widget.scanData[i]['image'].path.isNotEmpty) ? () => _showEnlargedImage(widget.scanData[i]['image'].path) : null,
+                        onTap: (i < widget.scanData.length && _imagePath(widget.scanData[i]).isNotEmpty) ? () => _showEnlargedImage(_imagePath(widget.scanData[i])) : null,
                         child: Container(
                           decoration: BoxDecoration(color: Colors.black, borderRadius: BorderRadius.circular(8)),
                           clipBehavior: Clip.antiAlias,
                           child: Stack(
                             fit: StackFit.expand,
                             children: [
-                              (i < widget.scanData.length && widget.scanData[i]['image'].path.isNotEmpty)
-                                  ? (kIsWeb ? Image.network(widget.scanData[i]['image'].path, fit: BoxFit.cover) : Image.file(File(widget.scanData[i]['image'].path), fit: BoxFit.cover))
+                              (i < widget.scanData.length && _imagePath(widget.scanData[i]).isNotEmpty)
+                                  ? (kIsWeb ? Image.network(_imagePath(widget.scanData[i]), fit: BoxFit.cover) : Image.file(File(_imagePath(widget.scanData[i])), fit: BoxFit.cover))
                                   : Center(child: Text(i < widget.scanData.length ? 'Mock Image' : 'Pending', style: const TextStyle(color: Colors.white54, fontSize: 12))),
                               if (i < widget.scanData.length)
                                 Positioned(
