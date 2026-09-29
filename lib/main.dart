@@ -1,4 +1,5 @@
 import 'package:flutter/material.dart';
+import 'dart:io';
 import 'package:camera/camera.dart';
 
 import 'panels/camera_panel.dart';
@@ -10,7 +11,12 @@ List<CameraDescription> cameras = [];
 Future<void> main() async {
   WidgetsFlutterBinding.ensureInitialized();
   try {
-    cameras = await availableCameras();
+    // Only call availableCameras() if NOT running on Linux desktop
+    if (!Platform.isLinux) {
+      cameras = await availableCameras();
+    } else {
+      debugPrint('Running on Linux: Bypassing native camera initialization.');
+    }
   } catch (e) {
     debugPrint('Error initializing cameras: $e');
   }
@@ -123,18 +129,18 @@ class _MainLayoutState extends State<MainLayout> {
   Widget build(BuildContext context) {
     final List<Widget> panels = [
       CameraPanel(
-        cameras: cameras,
         scanData: _scanData,
-        // Reset current scans logic
+        currentScanId: _currentScanId, // <--- Added this required parameter
         onReset: () => setState(() => _scanData.clear()),
-        onImageCaptured: (image, side, view) async {
+        onImageCaptured: (imagePath, side, view, aiResult) async { // <--- Updated parameters to accept aiResult
           setState(() {
             if (_scanData.isEmpty) {
               _currentScanId =
                   'SCAN-${_scanCounter.toString().padLeft(4, '0')}';
               _scanCounter++;
             }
-            _scanData.add({'image': image, 'side': side, 'view': view});
+            // Save the captured file path and scan info
+            _scanData.add({'image': imagePath, 'side': side, 'view': view});
           });
 
           if (_scanData.length >= 2) {
@@ -147,16 +153,9 @@ class _MainLayoutState extends State<MainLayout> {
             if (mounted) {
               setState(() {
                 _isProcessingAI = false;
-                _aiLeftResult = {
-                  'classification': 'BI-RADS 1',
-                  'confidence': '95%',
-                  'recommendation': 'Negative. Routine screening.',
-                };
-                _aiRightResult = {
-                  'classification': 'BI-RADS 4',
-                  'confidence': '88%',
-                  'recommendation': 'Suspicious abnormality.',
-                };
+                // You can assign your AI results here or use the aiResult passed from the panel
+                _aiLeftResult = aiResult; 
+                _aiRightResult = aiResult;
                 _aiCombinedResult = {
                   'classification': 'BI-RADS 4',
                   'confidence': '88%',

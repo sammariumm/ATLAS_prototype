@@ -38,6 +38,7 @@ dependencies:
   path_provider: ^2.1.6
   pdf: ^3.13.1
   mailer: ^7.2.0
+  flutter_mjpeg: ^2.0.0
 
 dev_dependencies:
   flutter_test:
