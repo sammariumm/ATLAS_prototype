@@ -1,0 +1,8 @@
+[Desktop Entry]
+Type=Application
+Name=ATLAS-BC
+Comment=Launch the ATLAS-BC mammography scanning app
+Exec=/home/raspi/app_prototype/deploy/launch-atlas-bc.sh
+X-GNOME-Autostart-enabled=true
+NoDisplay=false
+Terminal=false

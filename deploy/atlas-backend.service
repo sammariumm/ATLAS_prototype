@@ -1,0 +1,14 @@
+[Unit]
+Description=ATLAS-BC camera/AI backend (Flask + Picamera2)
+After=network.target
+
+[Service]
+Type=simple
+User=raspi
+WorkingDirectory=/home/raspi/app_prototype
+ExecStart=/usr/bin/python3 /home/raspi/app_prototype/app.py
+Restart=on-failure
+RestartSec=2
+
+[Install]
+WantedBy=multi-user.target
