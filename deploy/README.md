@@ -26,7 +26,7 @@ application — copy/move the whole `bundle/` folder wherever you want to run
 it from, but keep its contents together.
 
 If your build lands in a differently-named `<arch>` folder, update the
-`Exec=` path in `atlas-bc.desktop` below to match.
+`exec` path at the bottom of `launch-atlas-bc.sh` to match.
 
 ## 3. Auto-start the Python backend on boot
 
@@ -42,9 +42,17 @@ Logs: `journalctl -u atlas-backend.service -f`
 The service file assumes user `raspi` and project path `/home/raspi/app_prototype`
 — edit `deploy/atlas-backend.service` first if yours differ.
 
-## 4. Auto-start the app when the desktop session loads
+## 4. Auto-start the app (and auto-rotate to portrait) when the desktop loads
+
+`launch-atlas-bc.sh` rotates the display to portrait via `wlr-randr` (Wayfire
+default on Raspberry Pi OS) and then launches the app. It assumes the screen
+is on `HDMI-A-2` with a `90` transform, matching this setup's current
+`wlr-randr --output HDMI-A-2 --transform 90` — if you move the cable to the
+other HDMI port or the orientation comes out wrong, edit `OUTPUT`/`TRANSFORM`
+at the top of the script (run `wlr-randr` with no arguments to list outputs).
 
 ```bash
+chmod +x deploy/launch-atlas-bc.sh
 mkdir -p ~/.config/autostart
 cp deploy/atlas-bc.desktop ~/.config/autostart/
 ```
@@ -59,10 +67,24 @@ Autologin) so this actually launches without anyone signing in manually.
 sudo reboot
 ```
 
-The app should come up full-screen, borderless, with the backend already
-running. To get a normal decorated window back for debugging instead of
-kiosk fullscreen:
+The app should come up in portrait, full-screen, borderless, with the
+backend already running.
 
-```bash
-ATLAS_BC_WINDOWED=1 ./build/linux/arm64/release/bundle/atlas_bc
-```
+## Getting out of kiosk mode (to update the codebase, debug, etc.)
+
+- **Keyboard attached to the Pi**: press **Ctrl+Alt+Q**. This quits the app
+  immediately — it's handled at the native window level before Flutter sees
+  the keypress, so it works even if the UI has frozen. You'll land back on
+  the desktop, where you can open a terminal, `git pull`, rebuild
+  (`flutter build linux --release`), and either re-launch
+  `launch-atlas-bc.sh` manually or just reboot.
+- **No keyboard / remote only**: SSH into the Pi and run `pkill atlas_bc`
+  (or `sudo systemctl stop atlas-backend.service` if you also need the
+  backend down). Since the app isn't managed by systemd itself, killing the
+  process is enough — it won't auto-relaunch until the next login/reboot.
+- To get a normal decorated window back for debugging instead of kiosk
+  fullscreen, bypass the autostart entry and run the binary directly with:
+
+  ```bash
+  ATLAS_BC_WINDOWED=1 ./build/linux/arm64/release/bundle/atlas_bc
+  ```

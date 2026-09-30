@@ -4,6 +4,7 @@
 #ifdef GDK_WINDOWING_X11
 #include <gdk/gdkx.h>
 #endif
+#include <gdk/gdkkeysyms.h>
 
 #include "flutter/generated_plugin_registrant.h"
 
@@ -17,6 +18,22 @@ G_DEFINE_TYPE(MyApplication, my_application, GTK_TYPE_APPLICATION)
 // Called when first Flutter frame received.
 static void first_frame_cb(MyApplication* self, FlView* view) {
   gtk_widget_show(gtk_widget_get_toplevel(GTK_WIDGET(view)));
+}
+
+// Kiosk failsafe: Ctrl+Alt+Q quits the app immediately, regardless of what
+// the Flutter UI is doing. This is intercepted at the GTK window level
+// before the event reaches the Flutter view, so it works even to recover
+// from a frozen/unresponsive UI -- e.g. to get back to the desktop and
+// `git pull` / rebuild without unplugging the Pi.
+static gboolean on_key_press(GtkWidget* widget, GdkEventKey* event,
+                              gpointer user_data) {
+  MyApplication* self = MY_APPLICATION(user_data);
+  const guint ctrl_alt = GDK_CONTROL_MASK | GDK_MOD1_MASK;
+  if ((event->state & ctrl_alt) == ctrl_alt && event->keyval == GDK_KEY_q) {
+    g_application_quit(G_APPLICATION(self));
+    return TRUE;
+  }
+  return FALSE;
 }
 
 // Implements GApplication::activate.
@@ -36,6 +53,8 @@ static void my_application_activate(GApplication* application) {
     gtk_window_set_decorated(window, FALSE);
     gtk_window_fullscreen(window);
   }
+
+  g_signal_connect(window, "key-press-event", G_CALLBACK(on_key_press), self);
 
   g_autoptr(FlDartProject) project = fl_dart_project_new();
   fl_dart_project_set_dart_entrypoint_arguments(
