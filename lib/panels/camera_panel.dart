@@ -80,8 +80,13 @@ class _CameraPanelState extends State<CameraPanel> {
 
   @override
   Widget build(BuildContext context) {
+    // Unilateral CC/MLO flow: both captures are the same breast side, so once
+    // the first shot is taken, lock the side selector to it and require the
+    // other view next instead of letting the side be switched.
     final String? takenSide =
         widget.scanData.isNotEmpty ? widget.scanData[0]['side'] : null;
+    final String? takenView =
+        widget.scanData.isNotEmpty ? widget.scanData[0]['view'] : null;
 
     return Column(
       children: [
@@ -173,7 +178,9 @@ class _CameraPanelState extends State<CameraPanel> {
                                   padding:
                                       const EdgeInsets.symmetric(vertical: 20),
                                 ),
-                                onPressed: (takenSide == side || _isProcessing)
+                                onPressed: ((takenSide != null &&
+                                            takenSide != side) ||
+                                        _isProcessing)
                                     ? null
                                     : () =>
                                         setState(() => _selectedSide = side),
@@ -205,7 +212,7 @@ class _CameraPanelState extends State<CameraPanel> {
                                   padding:
                                       const EdgeInsets.symmetric(vertical: 20),
                                 ),
-                                onPressed: _isProcessing
+                                onPressed: (takenView == view || _isProcessing)
                                     ? null
                                     : () =>
                                         setState(() => _selectedView = view),
