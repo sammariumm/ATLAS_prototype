@@ -28,10 +28,10 @@ for i in 1 2 3 4 5; do
     sleep 1
 done
 
-# Give the compositor a moment to settle the new output geometry before
-# handing it a new fullscreen client -- launching immediately after a
-# transform change was observed to hang with the window never appearing.
-sleep 2
+# Give the compositor time to settle the new output geometry before handing
+# it a new fullscreen client. Confirmed on-device: 2s was not enough (the
+# app hung with no window ever appearing), 10s was. Using 12s for margin.
+sleep 12
 
 BIN=/home/raspi/app_prototype/build/linux/arm64/release/bundle/atlas_bc
 if [ ! -x "$BIN" ]; then
