@@ -1,6 +1,8 @@
 import os
+import sys
 import time
 import random
+import traceback
 import cv2
 import numpy as np
 from flask import Flask, Response, jsonify, request
@@ -16,8 +18,10 @@ USE_PICAMERA2 = False
 picam2 = None
 camera = None
 
+print(">>> Initializing camera backend...", flush=True)
 try:
     from picamera2 import Picamera2
+    print(">>> picamera2 imported, opening camera...", flush=True)
 
     picam2 = Picamera2()
     _config = picam2.create_video_configuration(
@@ -27,23 +31,26 @@ try:
     picam2.start()
     time.sleep(1)  # let auto-exposure/white-balance settle
     USE_PICAMERA2 = True
-    print("Camera backend: Picamera2 (libcamera / CSI Camera Module 2)")
-except Exception as e:
-    print(f"Picamera2 unavailable ({e}); falling back to OpenCV VideoCapture")
+    print("Camera backend: Picamera2 (libcamera / CSI Camera Module 2)", flush=True)
+except Exception:
+    print(">>> Picamera2 init failed with exception:", file=sys.stderr, flush=True)
+    traceback.print_exc()
+    print("Falling back to OpenCV VideoCapture", flush=True)
     camera = cv2.VideoCapture(0)
     if not camera.isOpened():
         camera = cv2.VideoCapture(1)
     camera.set(cv2.CAP_PROP_FRAME_WIDTH, 1280)
     camera.set(cv2.CAP_PROP_FRAME_HEIGHT, 720)
-    print("Camera backend: OpenCV VideoCapture (USB webcam)")
+    print("Camera backend: OpenCV VideoCapture (USB webcam)", flush=True)
 
 
 def read_frame():
     if USE_PICAMERA2:
         try:
             return True, picam2.capture_array()
-        except Exception as e:
-            print(f"Picamera2 capture error: {e}")
+        except Exception:
+            print(">>> Picamera2 capture error:", file=sys.stderr, flush=True)
+            traceback.print_exc()
             return False, None
     return camera.read()
 
