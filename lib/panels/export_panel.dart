@@ -3,29 +3,24 @@ import 'package:flutter/material.dart';
 import 'package:path_provider/path_provider.dart';
 import 'package:pdf/pdf.dart';
 import 'package:pdf/widgets.dart' as pw;
-<<<<<<< Updated upstream
-import 'package:flutter/foundation.dart' show kIsWeb;
-import '../../services/backend_service.dart';
-=======
 import '../services/backend_service.dart';
->>>>>>> Stashed changes
 
 class ExportPanel extends StatefulWidget {
   final List<Map<String, dynamic>> scanData;
   final String? scanId;
-  final Map<String, String>? leftResult;
-  final Map<String, String>? rightResult;
+  final Map<String, String>? ccResult;   // CHANGED
+  final Map<String, String>? mloResult;  // CHANGED
   final Map<String, String>? combinedResult;
-  final VoidCallback onNewPatient; // NEW
+  final VoidCallback onNewPatient; 
 
   const ExportPanel({
     super.key,
     required this.scanData,
     this.scanId,
-    this.leftResult,
-    this.rightResult,
+    this.ccResult,  // CHANGED
+    this.mloResult, // CHANGED
     this.combinedResult,
-    required this.onNewPatient, // NEW
+    required this.onNewPatient, 
   });
 
   @override
@@ -45,11 +40,28 @@ class _ExportPanelState extends State<ExportPanel> {
     try {
       final pdf = pw.Document();
 
-      final leftImageFile = File(widget.scanData.firstWhere((s) => s['side'] == 'Left')['image_path']);
-      final rightImageFile = File(widget.scanData.firstWhere((s) => s['side'] == 'Right')['image_path']);
+      // 1. SAFELY search for the CC and MLO images
+      String? ccImagePath;
+      String? mloImagePath;
+      String? scannedSide; // To determine if this is a Left or Right breast report
       
-      final leftImage = pw.MemoryImage(leftImageFile.readAsBytesSync());
-      final rightImage = pw.MemoryImage(rightImageFile.readAsBytesSync());
+      for (var scan in widget.scanData) {
+        if (scan['view'] == 'CC') {
+          ccImagePath = scan['image_path'];
+          scannedSide = scan['side']; // Capture which side this is for the PDF title
+        }
+        if (scan['view'] == 'MLO') mloImagePath = scan['image_path'];
+      }
+
+      if (ccImagePath == null || mloImagePath == null) {
+        throw Exception('Missing CC or MLO scan. Please capture both views.');
+      }
+
+      final ccImageFile = File(ccImagePath);
+      final mloImageFile = File(mloImagePath);
+      
+      final ccImage = pw.MemoryImage(ccImageFile.readAsBytesSync());
+      final mloImage = pw.MemoryImage(mloImageFile.readAsBytesSync());
 
       pdf.addPage(
         pw.MultiPage(
@@ -65,7 +77,7 @@ class _ExportPanelState extends State<ExportPanel> {
               child: pw.Column(
                 crossAxisAlignment: pw.CrossAxisAlignment.start,
                 children: [
-                  pw.Text('OVERALL BILATERAL DIAGNOSIS', style: pw.TextStyle(fontSize: 14, fontWeight: pw.FontWeight.bold)),
+                  pw.Text('OVERALL UNILATERAL DIAGNOSIS: ${scannedSide?.toUpperCase() ?? ''} BREAST', style: pw.TextStyle(fontSize: 14, fontWeight: pw.FontWeight.bold)),
                   pw.SizedBox(height: 8),
                   pw.Text('Classification: ${widget.combinedResult?['classification'] ?? 'N/A'}', style: pw.TextStyle(fontSize: 22, color: PdfColors.red800, fontWeight: pw.FontWeight.bold)),
                   pw.Text('Confidence: ${widget.combinedResult?['confidence'] ?? 'N/A'}'),
@@ -74,7 +86,7 @@ class _ExportPanelState extends State<ExportPanel> {
             ),
             pw.SizedBox(height: 20),
 
-            pw.Text('Individual Scans', style: pw.TextStyle(fontSize: 18, fontWeight: pw.FontWeight.bold)),
+            pw.Text('Individual Views', style: pw.TextStyle(fontSize: 18, fontWeight: pw.FontWeight.bold)),
             pw.Divider(),
             pw.Row(
               mainAxisAlignment: pw.MainAxisAlignment.spaceBetween,
@@ -84,11 +96,11 @@ class _ExportPanelState extends State<ExportPanel> {
                   child: pw.Column(
                     crossAxisAlignment: pw.CrossAxisAlignment.start,
                     children: [
-                      pw.Text('LEFT BREAST', style: pw.TextStyle(fontWeight: pw.FontWeight.bold)),
-                      pw.Text('Result: ${widget.leftResult?['classification'] ?? 'N/A'}'),
-                      pw.Text('Confidence: ${widget.leftResult?['confidence'] ?? 'N/A'}'),
+                      pw.Text('CC VIEW', style: pw.TextStyle(fontWeight: pw.FontWeight.bold)),
+                      pw.Text('Result: ${widget.ccResult?['classification'] ?? 'N/A'}'),
+                      pw.Text('Confidence: ${widget.ccResult?['confidence'] ?? 'N/A'}'),
                       pw.SizedBox(height: 10),
-                      pw.Image(leftImage, height: 200)
+                      pw.Image(ccImage, height: 200)
                     ]
                   )
                 ),
@@ -97,11 +109,11 @@ class _ExportPanelState extends State<ExportPanel> {
                   child: pw.Column(
                     crossAxisAlignment: pw.CrossAxisAlignment.start,
                     children: [
-                      pw.Text('RIGHT BREAST', style: pw.TextStyle(fontWeight: pw.FontWeight.bold)),
-                      pw.Text('Result: ${widget.rightResult?['classification'] ?? 'N/A'}'),
-                      pw.Text('Confidence: ${widget.rightResult?['confidence'] ?? 'N/A'}'),
+                      pw.Text('MLO VIEW', style: pw.TextStyle(fontWeight: pw.FontWeight.bold)),
+                      pw.Text('Result: ${widget.mloResult?['classification'] ?? 'N/A'}'),
+                      pw.Text('Confidence: ${widget.mloResult?['confidence'] ?? 'N/A'}'),
                       pw.SizedBox(height: 10),
-                      pw.Image(rightImage, height: 200)
+                      pw.Image(mloImage, height: 200)
                     ]
                   )
                 ),

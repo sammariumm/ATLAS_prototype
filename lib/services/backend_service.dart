@@ -1,20 +1,5 @@
 import 'dart:io';
-<<<<<<< Updated upstream
-
-import 'package:flutter/foundation.dart';
-import 'package:mailer/mailer.dart';
-import 'package:mailer/smtp_server.dart';
-
-class BackendService {
-  // --- THESIS EMAIL CONFIGURATION ---
-  // Put your dedicated thesis sender email and generated App Password here
-  static const String senderEmail = 'barbeyto.mikkoloeiroc06@gmail.com';
-  static const String appPassword = 'nsme qpzy pmyq lkhy';
-
-  static Future<void> saveToDatabase({
-=======
 import 'dart:convert';
-import 'package:flutter/foundation.dart';
 import 'package:http/http.dart' as http;
 import 'package:mailer/mailer.dart';
 import 'package:mailer/smtp_server.dart';
@@ -47,35 +32,19 @@ class BackendService {
   }
 
   static Future<bool> saveScanRecord({
->>>>>>> Stashed changes
-    required String scanId,
-    required String? physicianName,
-    required String? email,
-  }) async {
-<<<<<<< Updated upstream
-    debugPrint('DB: Saving metadata for $scanId...');
-    await Future.delayed(const Duration(milliseconds: 500));
-  }
-
-  static Future<bool> sendToBlockchain({
     required String scanId,
     required List<Map<String, dynamic>> scanData,
-    required String combinedClassification,
+    required Map<String, String>? ccResult,   // CHANGED
+    required Map<String, String>? mloResult,  // CHANGED
+    required Map<String, String>? combinedResult,
     required bool isAccurate,
   }) async {
-    debugPrint('BLOCKCHAIN: Minting record for $scanId...');
-    await Future.delayed(const Duration(seconds: 2));
-    return true;
-  }
-
-  /// Actually sends the email with the PDF attached via Gmail SMTP
-  static Future<void> sendEmailReport({
-=======
     await DatabaseHelper.instance.saveCompleteScan(
       scanId: scanId,
       physicianName: 'Attending',
-      leftClassification: leftResult?['classification'] ?? 'Unknown',
-      rightClassification: rightResult?['classification'] ?? 'Unknown',
+      // We map CC to the "left" DB column and MLO to the "right" DB column
+      leftClassification: ccResult?['classification'] ?? 'Unknown',
+      rightClassification: mloResult?['classification'] ?? 'Unknown',
       combinedClassification: combinedResult?['classification'] ?? 'Unknown',
       isAccurate: isAccurate,
       scanData: scanData,
@@ -84,50 +53,10 @@ class BackendService {
   }
 
   static Future<bool> sendEmailReport({
->>>>>>> Stashed changes
     required String emailAddress,
     required String pdfFilePath,
     required String scanId,
   }) async {
-<<<<<<< Updated upstream
-    debugPrint(
-      'EMAIL SERVICE: Preparing to send real email to $emailAddress...',
-    );
-
-    // 1. Configure the SMTP server
-    final smtpServer = gmail(senderEmail, appPassword);
-
-    // 2. Create the email message
-    final message = Message()
-      ..from = Address(senderEmail, 'ATLAS-BC System')
-      ..recipients.add(emailAddress)
-      ..subject = 'ATLAS-BC Medical Report - $scanId'
-      ..text =
-          'Hello,\n\nPlease find attached the automated AI analysis and physician validation report for Scan ID: $scanId.\n\nRegards,\nATLAS-BC Automated System';
-
-    // 3. Attach the generated PDF
-    if (pdfFilePath.isNotEmpty) {
-      final file = File(pdfFilePath);
-      if (await file.exists()) {
-        message.attachments.add(FileAttachment(file));
-      } else {
-        debugPrint('EMAIL ERROR: PDF file not found at $pdfFilePath');
-      }
-    }
-
-    // 4. Send the email
-    try {
-      final sendReport = await send(message, smtpServer);
-      debugPrint(
-        'EMAIL SERVICE: Success! Message sent: ${sendReport.toString()}',
-      );
-    } on MailerException catch (e) {
-      debugPrint('EMAIL SERVICE ERROR: Message not sent.');
-      for (var p in e.problems) {
-        debugPrint('Problem: ${p.code}: ${p.msg}');
-      }
-      throw Exception('Failed to send email. Check credentials or network.');
-=======
     String senderEmail = 'barbeyto.mikkoloeiroc06@gmail.com'; 
     String appPassword = 'nsme qpzy pmyq lkhy'; 
 
@@ -145,7 +74,6 @@ class BackendService {
       return true;
     } catch (e) {
       throw Exception('Failed to send email. Check internet or App Password.');
->>>>>>> Stashed changes
     }
   }
 }
