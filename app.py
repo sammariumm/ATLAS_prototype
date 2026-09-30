@@ -24,8 +24,12 @@ try:
     print(">>> picamera2 imported, opening camera...", flush=True)
 
     picam2 = Picamera2()
+    # Picamera2's format naming is inverted from what OpenCV expects: its
+    # "RGB888" is actually B,G,R in memory and "BGR888" is actually R,G,B.
+    # OpenCV (cv2.imencode/imwrite) wants BGR order, so request "RGB888" here
+    # -- using "BGR888" produces a red/blue-swapped, negative-looking image.
     _config = picam2.create_video_configuration(
-        main={"size": (1280, 720), "format": "BGR888"}
+        main={"size": (1280, 720), "format": "RGB888"}
     )
     picam2.configure(_config)
     picam2.start()
