@@ -4,6 +4,7 @@ import 'package:camera/camera.dart';
 class CameraPanel extends StatefulWidget {
   final List<CameraDescription> cameras;
   final List<Map<String, dynamic>> scanData;
+<<<<<<< Updated upstream
   final Function(XFile, String, String) onImageCaptured;
   final VoidCallback onReset;
 
@@ -13,6 +14,18 @@ class CameraPanel extends StatefulWidget {
     required this.scanData,
     required this.onImageCaptured,
     required this.onReset,
+=======
+  final String currentScanId;
+  final Function(String imagePath, String side, String view, Map<String, String> aiResult) onImageCaptured;
+  final VoidCallback onReset;
+
+  const CameraPanel({
+    super.key, 
+    required this.scanData, 
+    required this.currentScanId, 
+    required this.onImageCaptured, 
+    required this.onReset
+>>>>>>> Stashed changes
   });
 
   @override
@@ -29,6 +42,7 @@ class _CameraPanelState extends State<CameraPanel> {
   String? _selectedView;
   int _selectedCameraIndex = 0;
 
+<<<<<<< Updated upstream
   @override
   void initState() {
     super.initState();
@@ -60,6 +74,42 @@ class _CameraPanelState extends State<CameraPanel> {
       if (mounted) setState(() => _hasNoCamera = false);
     } catch (e) {
       if (mounted) setState(() => _hasNoCamera = true);
+=======
+  void _executeCapture() async {
+    // Determine what to capture based on if it's the 1st or 2nd scan
+    bool hasFirstScan = widget.scanData.isNotEmpty;
+    String? sideToCapture = hasFirstScan ? widget.scanData[0]['side'] : _selectedSide;
+    String? viewToCapture = hasFirstScan ? (widget.scanData[0]['view'] == 'CC' ? 'MLO' : 'CC') : _selectedView;
+
+    if (sideToCapture == null || viewToCapture == null) return;
+    setState(() => _isProcessing = true);
+
+    try {
+      final result = await BackendService.triggerPythonCapture(
+        scanId: widget.currentScanId,
+        side: sideToCapture, 
+        view: viewToCapture
+      );
+
+      final aiData = {
+        'classification': result['classification'].toString(),
+        'confidence': result['confidence'].toString(),
+        'recommendation': result['recommendation'].toString(),
+      };
+
+      widget.onImageCaptured(result['image_path'].toString(), sideToCapture, viewToCapture, aiData);
+      
+      // Reset user selections so they are blank for the NEXT patient
+      setState(() { _selectedSide = null; _selectedView = null; });
+    } catch (e) {
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          const SnackBar(content: Text('Failed to connect to AI server', style: TextStyle(color: Colors.white)), backgroundColor: Colors.red)
+        );
+      }
+    } finally {
+      if (mounted) setState(() => _isProcessing = false);
+>>>>>>> Stashed changes
     }
   }
 
@@ -80,6 +130,7 @@ class _CameraPanelState extends State<CameraPanel> {
 
   @override
   Widget build(BuildContext context) {
+<<<<<<< Updated upstream
     String? takenSide = widget.scanData.isNotEmpty
         ? widget.scanData[0]['side']
         : null;
@@ -220,6 +271,45 @@ class _CameraPanelState extends State<CameraPanel> {
                         ),
                       ),
                     ],
+=======
+    // 1. Analyze what is currently in the database for this session
+    bool hasFirstScan = widget.scanData.isNotEmpty;
+    String? lockedSide = hasFirstScan ? widget.scanData[0]['side'] : null;
+    String? completedView = hasFirstScan ? widget.scanData[0]['view'] : null;
+
+    // 2. Figure out what buttons should be highlighted green
+    String? displaySide = hasFirstScan ? lockedSide : _selectedSide;
+    String? displayView = hasFirstScan ? (completedView == 'CC' ? 'MLO' : 'CC') : _selectedView;
+
+    return Column(
+      children: [
+        // TOP: Camera Stream
+        Expanded(
+          flex: 5,
+          child: Container(
+            color: Colors.black,
+            child: Stack(
+              fit: StackFit.expand,
+              children: [
+                Mjpeg(
+                  isLive: true,
+                  stream: 'http://127.0.0.1:5000/stream',
+                  error: (context, error, stack) => const Center(child: Text('Connecting to Python Camera...', style: TextStyle(color: Colors.white54))),
+                ),
+                if (_isProcessing)
+                  Container(
+                    color: Colors.black87,
+                    child: const Center(
+                      child: Column(
+                        mainAxisSize: MainAxisSize.min, 
+                        children: [
+                          CircularProgressIndicator(color: Color(0xFF0D9488)), 
+                          SizedBox(height: 16), 
+                          Text('Processing Inference...', style: TextStyle(color: Colors.white, fontSize: 16))
+                        ]
+                      )
+                    ),
+>>>>>>> Stashed changes
                   ),
                 ),
               ),
@@ -318,6 +408,7 @@ class _CameraPanelState extends State<CameraPanel> {
             ),
           ),
         ),
+<<<<<<< Updated upstream
 
         // Camera Switcher
         if (widget.cameras.length > 1)
@@ -391,6 +482,91 @@ class _CameraPanelState extends State<CameraPanel> {
                   ),
                 ),
               ),
+=======
+        
+        // BOTTOM: Controls
+        Expanded(
+          flex: 5,
+          child: Container(
+            color: const Color(0xFF0F172A),
+            padding: const EdgeInsets.all(16.0),
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.stretch,
+              children: [
+                const Text('SCAN CONFIG', style: TextStyle(color: Colors.white, fontWeight: FontWeight.bold, fontSize: 18)),
+                const SizedBox(height: 12),
+                
+                // SIDE BUTTONS (Left / Right)
+                Row(
+                  children: ['Left', 'Right'].map((side) {
+                    bool isTarget = (displaySide == side);
+                    bool isDisabled = hasFirstScan; // Lock buttons after 1st scan
+                    
+                    return Expanded(
+                      child: Padding(
+                        padding: const EdgeInsets.symmetric(horizontal: 4.0),
+                        child: ElevatedButton(
+                          style: ElevatedButton.styleFrom(
+                            backgroundColor: isTarget ? const Color(0xFF0D9488) : const Color(0xFF334155),
+                            disabledBackgroundColor: isTarget ? const Color(0xFF0D9488).withOpacity(0.7) : Colors.white10,
+                            foregroundColor: Colors.white,
+                            disabledForegroundColor: isTarget ? Colors.white : Colors.white38,
+                            padding: const EdgeInsets.symmetric(vertical: 20),
+                            side: (!isTarget && isDisabled) ? const BorderSide(color: Colors.white12) : BorderSide.none,
+                          ),
+                          onPressed: isDisabled ? null : () => setState(() => _selectedSide = side),
+                          child: Text(side, style: const TextStyle(fontSize: 16, fontWeight: FontWeight.bold)),
+                        ),
+                      ),
+                    );
+                  }).toList(),
+                ),
+                const SizedBox(height: 12),
+                
+                // VIEW BUTTONS (CC / MLO)
+                Row(
+                  children: ['CC', 'MLO'].map((view) {
+                    bool isTarget = (displayView == view);
+                    bool isDisabled = hasFirstScan; // Lock buttons after 1st scan
+
+                    return Expanded(
+                      child: Padding(
+                        padding: const EdgeInsets.symmetric(horizontal: 4.0),
+                        child: ElevatedButton(
+                          style: ElevatedButton.styleFrom(
+                            backgroundColor: isTarget ? const Color(0xFF0D9488) : const Color(0xFF334155),
+                            disabledBackgroundColor: isTarget ? const Color(0xFF0D9488).withOpacity(0.7) : Colors.white10,
+                            foregroundColor: Colors.white,
+                            disabledForegroundColor: isTarget ? Colors.white : Colors.white38,
+                            padding: const EdgeInsets.symmetric(vertical: 20),
+                            side: (!isTarget && isDisabled) ? const BorderSide(color: Colors.white12) : BorderSide.none,
+                          ),
+                          onPressed: isDisabled ? null : () => setState(() => _selectedView = view),
+                          child: Text(view, style: const TextStyle(fontSize: 16, fontWeight: FontWeight.bold)),
+                        ),
+                      ),
+                    );
+                  }).toList(),
+                ),
+                
+                const Spacer(),
+                
+                // CAPTURE BUTTON
+                ElevatedButton.icon(
+                  style: ElevatedButton.styleFrom(
+                    backgroundColor: const Color(0xFF0D9488), 
+                    disabledBackgroundColor: Colors.grey.shade800,
+                    padding: const EdgeInsets.symmetric(vertical: 20)
+                  ),
+                  onPressed: (displaySide != null && displayView != null && !_isProcessing) ? _executeCapture : null,
+                  icon: Icon(Icons.camera, color: (displaySide != null && displayView != null) ? Colors.white : Colors.white54, size: 28),
+                  label: Text(
+                    hasFirstScan ? 'CAPTURE ${displayView!} VIEW' : 'CAPTURE', 
+                    style: TextStyle(color: (displaySide != null && displayView != null) ? Colors.white : Colors.white54, fontSize: 20, fontWeight: FontWeight.bold)
+                  ),
+                ),
+              ],
+>>>>>>> Stashed changes
             ),
           ),
         ),
