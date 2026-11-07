@@ -168,42 +168,84 @@ def _set_camera_status(state, detail):
     CAMERA_STATUS["state"], CAMERA_STATUS["detail"] = state, detail
 
 
+WEBCAM_PROBE_TIMEOUT = 6.0   # seconds a webcam may take to deliver its first picture before it is given up
+
+
+def _linux_usb_webcams():
+    """The /dev/videoN capture nodes that belong to a USB camera (UVC).
+
+    Only those: a Raspberry Pi has dozens of V4L2 nodes of its own (video codec, ISP, CSI receiver, ...) that are not
+    cameras, and reading from them can block for minutes.  A UVC camera has two nodes, the second one carries
+    metadata only (its sysfs `index` is not 0)."""
+    nodes = []
+    for node in glob.glob("/sys/class/video4linux/video[0-9]*"):
+        try:
+            with open(node + "/index") as fh:
+                if int(fh.read().strip() or 0) != 0:
+                    continue
+        except (OSError, ValueError):
+            pass
+        if re.search(r"/usb\d+/", os.path.realpath(node)):
+            nodes.append("/dev/" + os.path.basename(node))
+    return sorted(nodes, key=lambda path: int(re.sub(r"\D", "", path) or 0))
+
+
 def _webcam_candidates():
-    """The webcams to try: the forced one, else every /dev/video* node (Linux) or the indices 0 to 2."""
+    """The webcams to try: the forced one, else every USB camera (Linux) or the indices 0 to 2."""
     if CAMERA_INDEX:
         return [int(CAMERA_INDEX) if CAMERA_INDEX.isdigit() else CAMERA_INDEX]
     if sys.platform.startswith("linux"):
-        return sorted(glob.glob("/dev/video[0-9]*"), key=lambda path: int(re.sub(r"\D", "", path) or 0))
+        return _linux_usb_webcams()
     return [0, 1, 2]
+
+
+def _probe_webcam(source, backend):
+    """(VideoCapture or None, problem).  Opens `source` and reads a picture; never takes longer than
+    WEBCAM_PROBE_TIMEOUT (a stuck driver is abandoned, not waited for)."""
+    box = {}
+
+    def work():
+        cap = cv2.VideoCapture(source, backend)
+        box["cap"] = cap
+        if not cap.isOpened():
+            box["problem"] = (f"{source} cannot be opened (in use by another program, or no permission: "
+                              f"is your user in the 'video' group?)")
+            return
+        for _ in range(8):
+            ok, frame = cap.read()
+            if ok and frame is not None and frame.size:
+                box["ok"] = True
+                return
+        box["problem"] = f"{source} opens but delivers no picture"
+
+    worker = threading.Thread(target=work, name="atlas-webcam-probe", daemon=True)
+    worker.start()
+    worker.join(WEBCAM_PROBE_TIMEOUT)
+    if worker.is_alive():
+        return None, f"{source} does not answer (stuck driver, or in use by another program)"
+    cap = box.get("cap")
+    if box.get("ok"):
+        return cap, None
+    if cap is not None:
+        cap.release()
+    return None, box.get("problem", f"{source} gave no picture")
 
 
 def _open_webcam():
     """Opens the first webcam that really delivers a picture.  Returns (VideoCapture or None, text).
 
-    A /dev/video node can exist and even open and still never deliver a frame (a laptop's metadata node), so a
-    camera only counts when a frame was read from it."""
+    A /dev/video node can exist and even open and still never deliver a frame, so a camera only counts when a
+    frame was read from it."""
     candidates = _webcam_candidates()
     if not candidates:
-        return None, ("No /dev/video* device exists. Is the webcam plugged in? "
-                      "(on Linux, `ls /dev/video*` must list it)")
+        return None, ("No USB camera found (on Linux `ls /dev/video*` and `v4l2-ctl --list-devices` show what the "
+                      "system sees; ATLAS_CAMERA_INDEX=<number or /dev/videoN> forces a device).")
     backend = cv2.CAP_V4L2 if sys.platform.startswith("linux") else cv2.CAP_ANY
     problems = []
     for source in candidates:
-        cap = cv2.VideoCapture(source, backend)
-        if not cap.isOpened():
-            cap.release()
-            problems.append(f"{source} cannot be opened (in use by another program, or no permission: "
-                            f"is your user in the 'video' group?)")
-            continue
-        got = False
-        for _ in range(8):
-            ok, frame = cap.read()
-            if ok and frame is not None and frame.size:
-                got = True
-                break
-        if not got:
-            cap.release()
-            problems.append(f"{source} opens but delivers no picture")
+        cap, problem = _probe_webcam(source, backend)
+        if cap is None:
+            problems.append(problem)
             continue
         cap.set(cv2.CAP_PROP_FRAME_WIDTH, CAMERA_SIZE[0])
         cap.set(cv2.CAP_PROP_FRAME_HEIGHT, CAMERA_SIZE[1])
@@ -264,8 +306,16 @@ def _init_camera():
     except Exception as exc:
         print(">>> Picamera2 init failed with exception:", file=sys.stderr, flush=True)
         traceback.print_exc()
-        print("Falling back to OpenCV VideoCapture", flush=True)
-        _init_webcam(picamera_problem=str(exc) or type(exc).__name__)
+        problem = str(exc) or type(exc).__name__
+        chain = " ".join(str(e) for e in (exc, exc.__cause__) if e).lower()
+        if "busy" in chain or "in use" in chain or "acquire" in chain:
+            problem = ("the camera is in use by another program. If the backend is already running (it starts at "
+                       "boot as atlas-backend.service) it owns the camera: stop it with "
+                       "`sudo systemctl stop atlas-backend.service`, or use that one")
+            print(">>> The Raspberry Pi camera is busy: another process owns it (see the message above).",
+                  flush=True)
+        print("Looking for a USB webcam instead", flush=True)
+        _init_webcam(picamera_problem=problem)
 
 
 _ROTATE_CODES = {

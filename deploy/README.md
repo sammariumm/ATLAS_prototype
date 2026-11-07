@@ -100,6 +100,9 @@ sudo systemctl status atlas-backend.service   # confirm it's running and picked 
 
 Logs: `journalctl -u atlas-backend.service -f`
 
+The service keeps the camera open, so to run `python3 app.py` by hand (to see its output) stop the service first with
+`sudo systemctl stop atlas-backend.service`, otherwise the second copy cannot open the camera.
+
 The service file assumes user `raspi` and project path `/home/raspi/app_prototype`
 — edit `deploy/atlas-backend.service` first if yours differ.
 
@@ -202,14 +205,22 @@ The file type is recognised from its content, not its extension. The converted P
 ### Camera (film on the lightbox)
 
 * **Which camera.** On the Pi the CSI camera is used (Picamera2). On a PC, or a Pi without that camera, the backend
-  looks for a USB webcam: it tries every `/dev/video*` and uses the first one that really delivers a picture
-  (`ATLAS_CAMERA_INDEX` forces one, e.g. `2` or `/dev/video2`). `ATLAS_CAMERA=none` switches the camera **off**
-  (softcopy only), so do **not** set it when you want the live view.
+  looks for a **USB** webcam (found through `/sys/class/video4linux`; the Pi's own internal `/dev/video*` nodes for the
+  video codec and ISP are not cameras and are never touched) and uses the first one that really delivers a picture. A
+  camera that does not answer within 6 seconds is given up, so the backend always starts. `ATLAS_CAMERA_INDEX` forces
+  one, e.g. `2` or `/dev/video2`. `ATLAS_CAMERA=none` switches the camera **off** (softcopy only), so do **not** set it
+  when you want the live view.
+* **One program at a time.** A camera can be opened by only one program. On the Pi the backend already runs as
+  `atlas-backend.service` from boot and owns the camera, so starting a second copy by hand (`python3 app.py`) fails with
+  *Failed to acquire camera: Device or resource busy*. To run it by hand, stop the service first
+  (`sudo systemctl stop atlas-backend.service`), and start it again afterwards
+  (`sudo systemctl start atlas-backend.service`). To see what holds the camera: `pgrep -af "app.py|rpicam|libcamera"`.
+  After copying new files to the Pi, `sudo systemctl restart atlas-backend.service` makes the service use them.
 * **No live view?** The stream tells you why in words: *CAMERA OFF* (switched off with `ATLAS_CAMERA=none`),
-  *NO CAMERA FOUND* (nothing opened; the text lists every device tried and why it failed) or *CAMERA ERROR* (it opened but
-  stopped delivering a picture). The same is in `curl localhost:5000/health` under `camera_status`. To see the stream
-  without the app, open `http://127.0.0.1:5000/video_feed` in a browser. On Linux check `ls -l /dev/video*` and that your
-  user is in the `video` group.
+  *NO CAMERA FOUND* (nothing opened; the text says why: in use by another program, no USB camera, ...) or *CAMERA ERROR*
+  (it opened but stopped delivering a picture). The same is in `curl localhost:5000/health` under `camera_status`. To see
+  the stream without the app, open `http://127.0.0.1:5000/video_feed` in a browser. On Linux check `ls -l /dev/video*`
+  (USB cameras) and that your user is in the `video` group.
 * The picture is rotated by `ATLAS_CAMERA_ROTATION` degrees counter-clockwise (default **90**) before anything else
   sees it, so the live preview and the saved photo have the same orientation. If the film comes out sideways or
   upside down, set the value to `270` (or `0` / `180`).
