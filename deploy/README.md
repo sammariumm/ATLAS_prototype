@@ -201,6 +201,15 @@ The file type is recognised from its content, not its extension. The converted P
 
 ### Camera (film on the lightbox)
 
+* **Which camera.** On the Pi the CSI camera is used (Picamera2). On a PC, or a Pi without that camera, the backend
+  looks for a USB webcam: it tries every `/dev/video*` and uses the first one that really delivers a picture
+  (`ATLAS_CAMERA_INDEX` forces one, e.g. `2` or `/dev/video2`). `ATLAS_CAMERA=none` switches the camera **off**
+  (softcopy only), so do **not** set it when you want the live view.
+* **No live view?** The stream tells you why in words: *CAMERA OFF* (switched off with `ATLAS_CAMERA=none`),
+  *NO CAMERA FOUND* (nothing opened; the text lists every device tried and why it failed) or *CAMERA ERROR* (it opened but
+  stopped delivering a picture). The same is in `curl localhost:5000/health` under `camera_status`. To see the stream
+  without the app, open `http://127.0.0.1:5000/video_feed` in a browser. On Linux check `ls -l /dev/video*` and that your
+  user is in the `video` group.
 * The picture is rotated by `ATLAS_CAMERA_ROTATION` degrees counter-clockwise (default **90**) before anything else
   sees it, so the live preview and the saved photo have the same orientation. If the film comes out sideways or
   upside down, set the value to `270` (or `0` / `180`).
@@ -232,7 +241,8 @@ The file type is recognised from its content, not its extension. The converted P
 
 | Variable | Default | Meaning |
 |---|---|---|
-| `ATLAS_CAMERA` | `auto` | `none` = do not open a camera (softcopy-only machine) |
+| `ATLAS_CAMERA` | `auto` | `none` = do not open a camera (softcopy-only machine; the live view then says CAMERA OFF) |
+| `ATLAS_CAMERA_INDEX` | first that works | USB webcam to use: a number or a device path such as `/dev/video2` |
 | `ATLAS_CAMERA_SIZE` | `1640x1232` | camera resolution (the Camera Module 2's full-field 4:3 mode) |
 | `ATLAS_CAMERA_ROTATION` | `90` | degrees counter-clockwise: `0`, `90`, `180`, `270` |
 | `ATLAS_EXPOSURE_US` | `0` | exposure time in microseconds; `0` = freeze what auto-exposure chose at start-up |
