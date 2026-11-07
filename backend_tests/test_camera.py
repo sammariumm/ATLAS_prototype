@@ -49,6 +49,8 @@ def clean_camera(monkeypatch):
     FakeCapture.opened_sources = []
     monkeypatch.setattr(backend, "camera", None)
     monkeypatch.setattr(backend, "USE_PICAMERA2", False)
+    monkeypatch.setattr(backend, "picam2", None)
+    monkeypatch.setattr(backend, "_picam_stuck", None)
     monkeypatch.setattr(backend, "CAMERA_BACKEND", "none")
     monkeypatch.setattr(backend, "CAMERA_INDEX", "")
     monkeypatch.setattr(backend, "CAMERA_STATUS", {"state": "starting", "detail": ""})
@@ -303,3 +305,112 @@ def test_a_busy_pi_camera_falls_back_to_a_usb_camera_if_there_is_one(monkeypatch
     monkeypatch.setattr(backend.cv2, "VideoCapture", lambda src, api=None: FakeCapture(src, api))
     backend._init_camera()
     assert backend.CAMERA_STATUS["state"] == "ok" and "/dev/video0" in backend.CAMERA_STATUS["detail"]
+
+
+# ------------------------------- a Pi camera that opens but never sends a picture (loose ribbon cable)
+class SilentPicamera:
+    """What Picamera2 does with a loose cable: start() works, every capture then waits for ever
+    ('Camera frontend has timed out')."""
+    flowing = threading.Event()               # set() = the pictures start to arrive
+
+    def create_video_configuration(self, **kw):
+        return kw
+
+    def configure(self, config):
+        pass
+
+    def start(self):
+        pass
+
+    def set_controls(self, controls):
+        pass
+
+    def capture_metadata(self):
+        self.flowing.wait(30)
+        return {"ExposureTime": 10000, "AnalogueGain": 1.0}
+
+    def capture_array(self):
+        self.flowing.wait(30)
+        return np.full((480, 640, 3), 90, np.uint8)
+
+
+@pytest.fixture()
+def silent_pi(monkeypatch):
+    """Importing picamera2 works and gives the silent camera; waits are shortened."""
+    SilentPicamera.flowing = threading.Event()
+    fake = types.ModuleType("picamera2")
+    fake.Picamera2 = SilentPicamera
+    monkeypatch.setitem(sys.modules, "picamera2", fake)
+    monkeypatch.setattr(backend, "CAMERA_MODE", "auto")
+    monkeypatch.setattr(backend, "_picam_timeout", lambda: 0.3)
+    monkeypatch.setattr(backend, "EXPOSURE_US", 10000)
+    monkeypatch.setattr(backend, "ANALOGUE_GAIN", 2.0)
+    yield SilentPicamera
+    SilentPicamera.flowing.set()                                         # lets the abandoned threads end
+    backend.USE_PICAMERA2 = False
+
+
+def _picam_threads():
+    return [t for t in threading.enumerate() if t.name == "atlas-picamera-call" and t.is_alive()]
+
+
+def test_a_pi_camera_that_sends_no_picture_does_not_stop_the_backend(silent_pi):
+    started = time.monotonic()
+    backend._init_camera()                                               # used to wait for ever
+    assert time.monotonic() - started < 5
+    st = backend.CAMERA_STATUS
+    assert st["state"] == "read_failed" and "ribbon cable" in st["detail"]
+    assert backend.USE_PICAMERA2 is True
+    # the live view explains it in words instead of hanging
+    frame = _text_of(next(backend.generate_frames()))
+    assert frame is not None and frame.size
+    backend.app.config["TESTING"] = True
+    j = backend.app.test_client().get("/health").get_json()
+    assert j["camera"] == "picamera2" and j["camera_status"]["state"] == "read_failed"
+
+
+def test_a_silent_camera_does_not_pile_up_threads(silent_pi):
+    backend._init_camera()
+    before = len(_picam_threads())
+    started = time.monotonic()
+    for _ in range(50):                                                  # a stream polling a dead camera
+        assert backend.read_frame() == (False, None)
+    assert time.monotonic() - started < 2                                # fails at once, no 0.3 s per try
+    assert len(_picam_threads()) == before <= 1
+
+
+def test_the_camera_works_again_when_the_pictures_start_to_flow(silent_pi):
+    backend._init_camera()
+    assert backend.read_frame() == (False, None) and backend.CAMERA_STATUS["state"] == "read_failed"
+    silent_pi.flowing.set()                                              # cable pushed in
+    time.sleep(0.2)                                                      # the waiting call returns
+    ok, frame = backend.read_frame()
+    assert ok and frame.shape[2] == 3 and backend.CAMERA_STATUS["state"] == "ok"
+
+
+def test_a_working_pi_camera_is_unchanged(silent_pi, monkeypatch):
+    silent_pi.flowing.set()                                              # pictures flow from the start
+    monkeypatch.setattr(backend.time, "sleep", lambda s: None)
+    monkeypatch.setattr(backend, "_lock_picamera_exposure", lambda: None)
+    backend._init_camera()
+    assert backend.CAMERA_STATUS["state"] == "ok" and backend.CAMERA_BACKEND == "picamera2"
+    ok, frame = backend.read_frame()
+    assert ok and frame.shape[2] == 3
+    assert backend.grab_still(3).shape[2] == 3
+
+
+def test_an_error_inside_a_picamera_call_still_reaches_the_caller():
+    def boom():
+        raise ValueError("sensor said no")
+    with pytest.raises(ValueError, match="sensor said no"):
+        backend._picam_call(boom, timeout=2)
+    assert backend._picam_call(lambda: 42, timeout=2) == 42
+
+
+def test_the_exposure_lock_still_works_through_the_guarded_calls(silent_pi, monkeypatch):
+    silent_pi.flowing.set()
+    monkeypatch.setattr(backend.time, "sleep", lambda s: None)
+    monkeypatch.setattr(backend, "EXPOSURE_STATE", {})
+    backend._init_camera()
+    assert backend.CAMERA_STATUS["state"] == "ok"
+    assert backend.EXPOSURE_STATE["auto_exposure"] is False and backend.EXPOSURE_STATE["exposure_us"] == 10000
