@@ -46,3 +46,7 @@ app.*.map.json
 
 # Widget Preview related
 .widget_preview/
+
+# Trained AI weights (about 1.2 GB) are copied to the Pi by hand, see deploy/README.md 3b
+models/**/*.pth
+__pycache__/

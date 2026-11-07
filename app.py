@@ -1,112 +1,662 @@
 import os
+import re
+import stat
 import sys
 import time
-import random
+import threading
 import traceback
+
 import cv2
 import numpy as np
 from flask import Flask, Response, jsonify, request
 
+import atlas_convert
+import atlas_models
+import atlas_preprocess
+
 app = Flask(__name__)
 
-# --- Camera backend selection ---
+
+# ---------------------------------------------------------------------------
+# Settings (environment variables; the defaults suit the Raspberry Pi set-up)
+# ---------------------------------------------------------------------------
+def _env_int(name, default):
+    try:
+        return int(os.environ[name])
+    except (KeyError, ValueError):
+        return default
+
+
+def _env_float(name, default):
+    try:
+        return float(os.environ[name])
+    except (KeyError, ValueError):
+        return default
+
+
+def _env_flag(name, default):
+    v = os.environ.get(name, "").strip().lower()
+    if v in ("1", "true", "yes", "on"):
+        return True
+    if v in ("0", "false", "no", "off"):
+        return False
+    return default
+
+
+def _parse_size(text, default):
+    try:
+        w, h = text.lower().replace(",", "x").split("x")
+        return int(w), int(h)
+    except ValueError:
+        return default
+
+
+# ATLAS_CAMERA=none -> do not open any camera (softcopy-only machine, tests)
+CAMERA_MODE = os.environ.get("ATLAS_CAMERA", "auto").strip().lower()
+
+# Camera size.  1640x1232 is the Camera Module 2's full-field-of-view 2x2-binned mode (4:3).  The old 1280x720
+# is a cropped 16:9 mode, which loses field of view and resolution for a portrait film.
+CAMERA_SIZE = _parse_size(os.environ.get("ATLAS_CAMERA_SIZE", ""), (1640, 1232))
+
+# The picture is rotated this many degrees COUNTER-CLOCKWISE before anything else sees it (preview, saved
+# photo, film processing).  0, 90, 180 or 270.  If the film comes out upside down or sideways, change this.
+CAMERA_ROTATION = _env_int("ATLAS_CAMERA_ROTATION", 90)
+if CAMERA_ROTATION not in (0, 90, 180, 270):
+    print(">>> ATLAS_CAMERA_ROTATION must be 0, 90, 180 or 270; using 90", flush=True)
+    CAMERA_ROTATION = 90
+
+# Auto-exposure is turned OFF.  Leave these at 0 to freeze whatever auto-exposure settled on at start-up
+# (start the backend with the lightbox on), or set them to fixed values.
+EXPOSURE_US = _env_int("ATLAS_EXPOSURE_US", 0)         # exposure time in microseconds
+ANALOGUE_GAIN = _env_float("ATLAS_ANALOGUE_GAIN", 0.0)  # sensor gain, 1.0 = lowest noise
+LOCK_AWB = _env_flag("ATLAS_LOCK_AWB", False)           # also freeze the white balance
+
+CAPTURE_AVG = max(1, _env_int("ATLAS_CAPTURE_AVG", 4))  # frames averaged per still (less sensor noise)
+SAVE_DEBUG = _env_flag("ATLAS_SAVE_DEBUG", True)         # save debug pictures of the film processing
+REQUIRE_TISSUE = _env_flag("ATLAS_REQUIRE_TISSUE", True)  # reject camera shots in which no breast is found
+
+# Base directory for all scans (cross-platform: works on both Windows dev machine and the Raspberry Pi).
+SAVE_DIR = os.environ.get("ATLAS_SCAN_DIR") or os.path.join(os.path.expanduser("~"), "atlas_scans_test")
+# Softcopy files (DICOM / PNG / ...) are picked from a USB stick that is plugged into the device (the kiosk has no
+# keyboard or file manager, so nobody can copy files into a folder), and from this inbox folder, for anything that
+# does put files there (serial transfer, scp, ...).
+INBOX_DIR = os.environ.get("ATLAS_INBOX_DIR") or os.path.join(os.path.expanduser("~"), "atlas_inbox")
+try:
+    os.makedirs(INBOX_DIR, exist_ok=True)
+except OSError:
+    pass
+# A USB stick counts when it is mounted below one of these folders (Raspberry Pi OS: /media/<user>/<label>;
+# Arch / most desktops: /run/media/<user>/<label>).  Separate several folders with ":".
+MEDIA_ROOTS = [r for r in os.environ.get("ATLAS_MEDIA_ROOTS", "/media:/run/media").split(os.pathsep) if r.strip()]
+
+
+# ---------------------------------------------------------------------------
+# Camera
+# ---------------------------------------------------------------------------
 # Raspberry Pi OS (Bullseye+) exposes the CSI Camera Module 2 through the
 # libcamera stack, not the legacy V4L2 /dev/video0 device, so
 # cv2.VideoCapture(0) cannot see it. Use Picamera2 (libcamera bindings) when
 # available; otherwise fall back to a USB webcam via OpenCV for desktop dev.
 USE_PICAMERA2 = False
+CAMERA_BACKEND = "none"
 picam2 = None
 camera = None
+EXPOSURE_STATE = {}
+_camera_lock = threading.Lock()  # cv2.VideoCapture is not thread-safe
 
-print(">>> Initializing camera backend...", flush=True)
-try:
-    from picamera2 import Picamera2
-    print(">>> picamera2 imported, opening camera...", flush=True)
 
-    picam2 = Picamera2()
-    # Picamera2's format naming is inverted from what OpenCV expects: its
-    # "RGB888" is actually B,G,R in memory and "BGR888" is actually R,G,B.
-    # OpenCV (cv2.imencode/imwrite) wants BGR order, so request "RGB888" here
-    # -- using "BGR888" produces a red/blue-swapped, negative-looking image.
-    _config = picam2.create_video_configuration(
-        main={"size": (1280, 720), "format": "RGB888"}
-    )
-    picam2.configure(_config)
-    picam2.start()
-    time.sleep(1)  # let auto-exposure/white-balance settle
-    USE_PICAMERA2 = True
-    print("Camera backend: Picamera2 (libcamera / CSI Camera Module 2)", flush=True)
-except Exception:
-    print(">>> Picamera2 init failed with exception:", file=sys.stderr, flush=True)
-    traceback.print_exc()
-    print("Falling back to OpenCV VideoCapture", flush=True)
-    camera = cv2.VideoCapture(0)
-    if not camera.isOpened():
-        camera = cv2.VideoCapture(1)
-    camera.set(cv2.CAP_PROP_FRAME_WIDTH, 1280)
-    camera.set(cv2.CAP_PROP_FRAME_HEIGHT, 720)
-    print("Camera backend: OpenCV VideoCapture (USB webcam)", flush=True)
+def _lock_picamera_exposure():
+    """Turn libcamera's auto-exposure OFF and pin exposure time + gain, so every film is photographed the same way."""
+    global EXPOSURE_STATE
+    try:
+        if EXPOSURE_US <= 0 or ANALOGUE_GAIN <= 0:
+            time.sleep(1.0)  # let auto-exposure settle once on the scene, then freeze what it chose
+        md = picam2.capture_metadata()
+        exposure = EXPOSURE_US if EXPOSURE_US > 0 else int(md.get("ExposureTime", 10000))
+        gain = ANALOGUE_GAIN if ANALOGUE_GAIN > 0 else float(md.get("AnalogueGain", 1.0))
+        controls = {"AeEnable": False, "ExposureTime": exposure, "AnalogueGain": gain}
+        if exposure + 1000 > 33333:  # long exposures need a longer frame time
+            controls["FrameDurationLimits"] = (exposure + 1000, exposure + 1000)
+        if LOCK_AWB:
+            controls["AwbEnable"] = False
+            gains = md.get("ColourGains")
+            if gains:
+                controls["ColourGains"] = (float(gains[0]), float(gains[1]))
+        picam2.set_controls(controls)
+        time.sleep(0.5)  # a few frames for the sensor to take the new values
+        md = picam2.capture_metadata()
+        EXPOSURE_STATE = {"auto_exposure": False,
+                          "exposure_us": md.get("ExposureTime"), "analogue_gain": md.get("AnalogueGain"),
+                          "awb_locked": LOCK_AWB}
+        print(">>> Auto-exposure OFF: ExposureTime=%s us, AnalogueGain=%s (requested %s us, gain %.2f)"
+              % (md.get("ExposureTime"), md.get("AnalogueGain"), exposure, gain), flush=True)
+    except Exception:
+        print(">>> Could not turn auto-exposure off:", file=sys.stderr, flush=True)
+        traceback.print_exc()
+
+
+def _lock_opencv_exposure():
+    """Best effort for a USB webcam (desktop development): webcams and drivers differ a lot."""
+    global EXPOSURE_STATE
+    try:
+        manual = 0.25 if sys.platform.startswith("win") else 1  # 'manual' has a different code per backend
+        camera.set(cv2.CAP_PROP_AUTO_EXPOSURE, manual)
+        raw = os.environ.get("ATLAS_OPENCV_EXPOSURE", "").strip()
+        if raw:
+            camera.set(cv2.CAP_PROP_EXPOSURE, float(raw))
+        EXPOSURE_STATE = {"auto_exposure": "requested off (webcam: not guaranteed)",
+                          "exposure": camera.get(cv2.CAP_PROP_EXPOSURE)}
+        print(">>> Webcam auto-exposure requested OFF (not every webcam/driver supports this); "
+              "set the exposure with ATLAS_OPENCV_EXPOSURE", flush=True)
+    except Exception:
+        print(">>> Could not change the webcam exposure mode:", file=sys.stderr, flush=True)
+        traceback.print_exc()
+
+
+def _init_camera():
+    global USE_PICAMERA2, CAMERA_BACKEND, picam2, camera
+    if CAMERA_MODE == "none":
+        print(">>> ATLAS_CAMERA=none: no camera opened (softcopy only).", flush=True)
+        return
+    print(">>> Initializing camera backend...", flush=True)
+    try:
+        from picamera2 import Picamera2
+        print(">>> picamera2 imported, opening camera...", flush=True)
+
+        picam2 = Picamera2()
+        # Picamera2's format naming is inverted from what OpenCV expects: its
+        # "RGB888" is actually B,G,R in memory and "BGR888" is actually R,G,B.
+        # OpenCV (cv2.imencode/imwrite) wants BGR order, so request "RGB888" here
+        # -- using "BGR888" produces a red/blue-swapped, negative-looking image.
+        _config = picam2.create_video_configuration(
+            main={"size": CAMERA_SIZE, "format": "RGB888"}
+        )
+        picam2.configure(_config)
+        picam2.start()
+        USE_PICAMERA2 = True
+        CAMERA_BACKEND = "picamera2"
+        _lock_picamera_exposure()
+        print("Camera backend: Picamera2 (libcamera / CSI Camera Module 2), size %s, rotation %d deg CCW"
+              % (CAMERA_SIZE, CAMERA_ROTATION), flush=True)
+    except Exception:
+        print(">>> Picamera2 init failed with exception:", file=sys.stderr, flush=True)
+        traceback.print_exc()
+        print("Falling back to OpenCV VideoCapture", flush=True)
+        camera = cv2.VideoCapture(0)
+        if not camera.isOpened():
+            camera = cv2.VideoCapture(1)
+        camera.set(cv2.CAP_PROP_FRAME_WIDTH, CAMERA_SIZE[0])
+        camera.set(cv2.CAP_PROP_FRAME_HEIGHT, CAMERA_SIZE[1])
+        CAMERA_BACKEND = "opencv"
+        _lock_opencv_exposure()
+        print("Camera backend: OpenCV VideoCapture (USB webcam)", flush=True)
+
+
+_ROTATE_CODES = {
+    90: cv2.ROTATE_90_COUNTERCLOCKWISE,
+    180: cv2.ROTATE_180,
+    270: cv2.ROTATE_90_CLOCKWISE,
+}
+
+
+def rotate_frame(frame):
+    code = _ROTATE_CODES.get(CAMERA_ROTATION)
+    return frame if code is None else cv2.rotate(frame, code)
 
 
 def read_frame():
+    """(ok, BGR frame) -- already rotated by ATLAS_CAMERA_ROTATION."""
     if USE_PICAMERA2:
         try:
-            return True, picam2.capture_array()
+            frame = picam2.capture_array()
         except Exception:
             print(">>> Picamera2 capture error:", file=sys.stderr, flush=True)
             traceback.print_exc()
             return False, None
-    return camera.read()
+    elif camera is not None:
+        with _camera_lock:
+            ok, frame = camera.read()
+        if not ok:
+            return False, None
+    else:
+        return False, None
+    return True, rotate_frame(frame)
 
 
-# Base directory for all scans (cross-platform: works on both Windows dev
-# machine and the Raspberry Pi's Linux filesystem).
-SAVE_DIR = os.path.join(os.path.expanduser("~"), "atlas_scans_test")
+def grab_still(n=None):
+    """A still for the film processing: the mean of a few consecutive frames (less sensor noise)."""
+    n = max(1, CAPTURE_AVG if n is None else n)
+    acc, got = None, 0
+    for _ in range(n):
+        ok, frame = read_frame()
+        if not ok or frame is None:
+            continue
+        acc = frame.astype(np.float32) if acc is None else acc + frame
+        got += 1
+    if got == 0:
+        return None
+    return np.clip(np.rint(acc / got), 0, 255).astype(np.uint8)
+
+
+PREVIEW_MAX_SIDE = 640
+
 
 def generate_frames():
     while True:
         success, frame = read_frame()
-        if not success:
-            frame = np.zeros((360, 640, 3), dtype=np.uint8)
-            cv2.putText(frame, "CAMERA ERROR", (150, 180), cv2.FONT_HERSHEY_SIMPLEX, 1.5, (0, 0, 255), 3)
+        if not success or frame is None:
+            frame = np.zeros((640, 480, 3), dtype=np.uint8)
+            cv2.putText(frame, "CAMERA ERROR", (40, 320), cv2.FONT_HERSHEY_SIMPLEX, 1.0, (0, 0, 255), 3)
+            time.sleep(0.2)
 
-        display_frame = cv2.resize(frame, (640, 360))
+        # keep the aspect ratio: the picture is portrait after the rotation
+        h, w = frame.shape[:2]
+        s = PREVIEW_MAX_SIDE / float(max(h, w))
+        display_frame = frame
+        if s < 1.0:
+            display_frame = cv2.resize(frame, (max(1, int(round(w * s))), max(1, int(round(h * s)))),
+                                       interpolation=cv2.INTER_AREA)
         _, buffer = cv2.imencode('.jpg', display_frame, [int(cv2.IMWRITE_JPEG_QUALITY), 70])
         yield (b'--frame\r\n'
                b'Content-Type: image/jpeg\r\n\r\n' + buffer.tobytes() + b'\r\n')
 
+
+# ---------------------------------------------------------------------------
+# Request helpers
+# ---------------------------------------------------------------------------
+_ID_RE = re.compile(r"^[A-Za-z0-9_-]{1,64}$")
+
+
+def _clean_scan_id(value):
+    value = str(value if value else "UNKNOWN_SCAN")
+    if not _ID_RE.match(value):
+        raise ValueError("Invalid scan id.")
+    return value
+
+
+def _clean_side(value):
+    value = str(value or "").strip().capitalize()
+    if value not in ("Left", "Right"):
+        raise ValueError("side must be 'Left' or 'Right'.")
+    return value
+
+
+def _clean_view(value):
+    value = str(value or "").strip().upper()
+    if value not in ("CC", "MLO"):
+        raise ValueError("view must be 'CC' or 'MLO'.")
+    return value
+
+
+def _inside(base, path):
+    """Real path of ``path`` (absolute, or relative to ``base``) -- only if it lies inside ``base``."""
+    base_real = os.path.realpath(base)
+    candidate = path if os.path.isabs(path) else os.path.join(base_real, path)
+    real = os.path.realpath(candidate)
+    if os.path.commonpath([base_real, real]) != base_real:
+        raise ValueError("That file is outside the allowed folder.")
+    return real
+
+
+def _write_preview(png_path):
+    """JPEG preview next to the PNG (the UI and the PDF use it).  Returns (preview path, width, height)."""
+    preview = os.path.splitext(png_path)[0] + "_preview.jpg"
+    w, h = atlas_preprocess.make_preview(png_path, preview)
+    return preview, w, h
+
+
+# ---------------------------------------------------------------------------
+# Routes
+# ---------------------------------------------------------------------------
 @app.route('/video_feed')
 def video_feed():
     return Response(generate_frames(), mimetype='multipart/x-mixed-replace; boundary=frame')
 
-@app.route('/capture', methods=['POST'])
-def capture_and_analyze():
-    data = request.json
-    scan_id = data.get('scan_id', 'UNKNOWN_SCAN')
-    side = data.get('side', 'Left')
-    view = data.get('view', 'CC')
 
-    success, frame = read_frame()
-    if not success:
+@app.route('/health')
+def health():
+    return jsonify({
+        'camera': CAMERA_BACKEND,
+        'camera_size': list(CAMERA_SIZE),
+        'rotation_ccw_deg': CAMERA_ROTATION,
+        'exposure': EXPOSURE_STATE,
+        'models': 'mock' if MODELS_ARE_MOCK else 'real',
+        'ai': None if MODELS_ARE_MOCK else atlas_models.get_ensemble().info(),
+        'scan_dir': SAVE_DIR,
+        'inbox_dir': INBOX_DIR,
+        'usb_volumes': [v['name'] for v in _usb_volumes()],
+    })
+
+
+@app.route('/capture', methods=['POST'])
+def capture():
+    """Camera source: photograph the film on the lightbox, turn the photo into a digital-like image."""
+    data = request.get_json(silent=True) or {}
+    try:
+        scan_id = _clean_scan_id(data.get('scan_id'))
+        side = _clean_side(data.get('side', 'Left'))
+        view = _clean_view(data.get('view', 'CC'))
+    except ValueError as exc:
+        return jsonify({'error': str(exc)}), 400
+
+    frame = grab_still()
+    if frame is None:
         return jsonify({'error': 'Failed to capture from hardware sensor'}), 500
 
     # Nested folder structure -> atlas_scans_test / SCAN-0002 / Left /
-    folder_path = os.path.join(SAVE_DIR, scan_id, side)
-    os.makedirs(folder_path, exist_ok=True)
+    folder = os.path.join(SAVE_DIR, scan_id, side)
+    os.makedirs(folder, exist_ok=True)
+    stem = f"{side}_{view}_{int(time.time())}"
 
-    timestamp = int(time.time())
-    file_path = os.path.join(folder_path, f"{side}_{view}_{timestamp}.png")
-    cv2.imwrite(file_path, frame, [int(cv2.IMWRITE_PNG_COMPRESSION), 0])
+    raw_path = os.path.join(folder, stem + "_camera.png")  # the untouched (rotated) photo
+    cv2.imwrite(raw_path, frame, [int(cv2.IMWRITE_PNG_COMPRESSION), 1])
 
-    time.sleep(2)
+    debug_path = os.path.join(SAVE_DIR, scan_id, "debug", stem + "_film.jpg") if SAVE_DEBUG else None
+    try:
+        digital, info = atlas_preprocess.film_to_digital(frame, debug_path=debug_path)
+    except Exception as exc:
+        traceback.print_exc()
+        return jsonify({'error': f'Film processing failed: {exc}'}), 500
+
+    if REQUIRE_TISSUE and not info.get('usable'):
+        return jsonify({'error': ' '.join(info.get('warnings') or ['No breast found in the photo.']),
+                        'warnings': info.get('warnings', []), 'quality': info, 'raw_path': raw_path}), 422
+
+    image_path = os.path.join(folder, stem + ".png")  # what the AI will see (16-bit, background = 0)
+    cv2.imwrite(image_path, digital, [int(cv2.IMWRITE_PNG_COMPRESSION), 3])
+    preview_path, _w, _h = _write_preview(image_path)
 
     return jsonify({
         'status': 'success',
-        'image_path': file_path, # Returns the new deeply nested path to Flutter
-        'classification': random.choice(['BI-RADS 1', 'BI-RADS 2', 'BI-RADS 4']),
-        'confidence': f"{random.uniform(85.0, 98.0):.1f}%",
-        'recommendation': 'Mock bilateral inference completed.'
+        'source': 'camera',
+        'image_path': image_path,  # Returns the nested path to Flutter
+        'preview_path': preview_path,
+        'raw_path': raw_path,
+        'warnings': info.get('warnings', []),
+        'quality': info,
     })
+
+
+USB_PREFIX = "usb:"          # ids of files on a stick look like  usb:<stick name>/<path inside the stick>
+MAX_FILES_PER_SOURCE = 4000  # a stick with more files than this is only searched in part (keeps the kiosk responsive)
+MAX_LISTED = 200
+
+
+def _unescape_mount_field(text):
+    """/proc/mounts writes a space as \\040, a tab as \\011, a backslash as \\134, ..."""
+    return re.sub(r'\\([0-7]{3})', lambda m: chr(int(m.group(1), 8)), text)
+
+
+def _usb_volumes(mounts_text=None):
+    """The removable volumes that are mounted right now: [{'name': 'MY_STICK', 'path': '/media/raspi/MY_STICK'}].
+
+    A mount counts when it is a real block device (/dev/...) mounted one or two levels below a media folder
+    (MEDIA_ROOTS), which is where the desktop's automounter puts a USB stick."""
+    if mounts_text is None:
+        try:
+            with open('/proc/self/mounts', encoding='utf-8', errors='replace') as fh:
+                mounts_text = fh.read()
+        except OSError:
+            return []
+    roots = [os.path.realpath(r) for r in MEDIA_ROOTS]
+    volumes, names = [], set()
+    for line in mounts_text.splitlines():
+        parts = line.split()
+        if len(parts) < 2 or not parts[0].startswith('/dev/'):
+            continue
+        mount_point = os.path.normpath(_unescape_mount_field(parts[1]))
+        for root in roots:
+            rel = os.path.relpath(mount_point, root)
+            if rel.startswith('..') or rel == '.' or rel.count(os.sep) > 1:
+                continue
+            name = os.path.basename(mount_point)
+            unique, n = name, 2
+            while unique in names:
+                unique, n = f"{name} ({n})", n + 1
+            names.add(unique)
+            volumes.append({'name': unique, 'path': mount_point})
+            break
+    return volumes
+
+
+def _skip_folder(name):
+    return name.startswith(('.', '$')) or name.lower() in ('system volume information', 'lost+found')
+
+
+def _walk_softcopy(base):
+    """(modified time, full path, size) of the files below ``base`` (at most 3 folders deep), hidden files and files
+    that are still being copied left out."""
+    found = []
+    for root, dirs, names in os.walk(base):
+        depth = 0 if root == base else os.path.relpath(root, base).count(os.sep) + 1
+        dirs[:] = [d for d in dirs if not _skip_folder(d)] if depth < 3 else []
+        for name in names:
+            if name.startswith('.') or name.lower().endswith(('.part', '.tmp', '.partial', '.crdownload')):
+                continue  # hidden files and files that are still being transferred
+            full = os.path.join(root, name)
+            try:
+                st = os.stat(full)
+            except OSError:
+                continue
+            if stat.S_ISREG(st.st_mode):
+                found.append((st.st_mtime, full, st.st_size))
+        if len(found) >= MAX_FILES_PER_SOURCE:
+            break
+    return found
+
+
+@app.route('/inbox', methods=['GET'])
+def inbox():
+    """The softcopy files the operator can pick: those on a plugged-in USB stick and those in the inbox folder,
+    newest first.  Files on a stick that are not images (documents, videos, ...) are left out."""
+    base = os.path.realpath(INBOX_DIR)
+    os.makedirs(base, exist_ok=True)
+    volumes = _usb_volumes()
+    candidates = []     # (modified, full path, size, id the app sends back to /import, shown path, source, on a stick?)
+    for mtime, full, size in _walk_softcopy(base):
+        shown = os.path.relpath(full, base)
+        candidates.append((mtime, full, size, shown, shown, 'Inbox', False))
+    for vol in volumes:
+        real = os.path.realpath(vol['path'])
+        for mtime, full, size in _walk_softcopy(real):
+            if os.path.islink(full):
+                continue
+            shown = os.path.relpath(full, real)
+            candidates.append((mtime, full, size, USB_PREFIX + vol['name'] + '/' + shown, shown,
+                               'USB: ' + vol['name'], True))
+    candidates.sort(key=lambda item: item[0], reverse=True)
+    files = []
+    for mtime, full, size, file_id, shown, source, on_stick in candidates:
+        if len(files) >= MAX_LISTED:
+            break
+        try:
+            fmt = atlas_convert.sniff_format(full)
+        except OSError:
+            continue
+        if on_stick and fmt == 'unknown':
+            continue
+        files.append({'path': file_id, 'display': shown, 'name': os.path.basename(full), 'size': size,
+                      'modified': int(mtime), 'format': fmt, 'source': source})
+    return jsonify({'inbox': base, 'volumes': [v['name'] for v in volumes], 'files': files})
+
+
+def _resolve_softcopy(source_path):
+    """The real path of a file the app picked (an inbox path, or  usb:<stick>/<path>),
+    only if it lies inside the inbox folder or inside a stick that is mounted now."""
+    if source_path.startswith(USB_PREFIX):
+        name, _, rel = source_path[len(USB_PREFIX):].partition('/')
+        for vol in _usb_volumes():
+            if vol['name'] == name:
+                if not rel:
+                    raise ValueError('source_path is required.')
+                return _inside(vol['path'], rel)
+        raise ValueError('That USB stick is not connected any more. Plug it in again and refresh the list.')
+    return _inside(INBOX_DIR, source_path)
+
+
+@app.route('/import', methods=['POST'])
+def import_softcopy():
+    """Softcopy source: take a file from a USB stick (or the inbox) and make a PNG of it
+    (DICOM -> PNG, PNG stays, other -> PNG)."""
+    data = request.get_json(silent=True) or {}
+    try:
+        scan_id = _clean_scan_id(data.get('scan_id'))
+        side = _clean_side(data.get('side'))
+        view = _clean_view(data.get('view'))
+        if not data.get('source_path'):
+            raise ValueError('source_path is required.')
+        source = _resolve_softcopy(str(data['source_path']))
+    except ValueError as exc:
+        return jsonify({'error': str(exc)}), 400
+    if not os.path.isfile(source):
+        return jsonify({'error': 'File not found. If it is on a USB stick, check that the stick is still plugged in.'}), 404
+
+    folder = os.path.join(SAVE_DIR, scan_id, side)
+    stem = f"{side}_{view}_{int(time.time())}"
+    try:
+        conv = atlas_convert.convert_to_png(source, folder, stem=stem)
+        preview_path, _w, _h = _write_preview(conv.png_path)
+    except atlas_convert.ConversionError as exc:
+        return jsonify({'error': str(exc)}), 422
+    except Exception as exc:
+        traceback.print_exc()
+        return jsonify({'error': f'Could not import the file: {exc}'}), 500
+
+    return jsonify({
+        'status': 'success',
+        'source': 'softcopy',
+        'image_path': conv.png_path,
+        'preview_path': preview_path,
+        'source_name': os.path.basename(source),
+        'source_format': conv.source_format,
+        'converted': conv.converted,  # False = it already was a PNG and was kept as it is
+        'bit_depth': conv.bit_depth,
+        'width': conv.width,
+        'height': conv.height,
+        'warnings': conv.warnings,
+    })
+
+
+# ---------------------------------------------------------------------------
+# AI
+# ---------------------------------------------------------------------------
+BIRADS = ["BI-RADS 1", "BI-RADS 2", "BI-RADS 3", "BI-RADS 4", "BI-RADS 5"]
+SIDE_NAME = {"L": "Left", "R": "Right"}
+
+# The real 15-network ensemble (atlas_models.py) is used by default.  ATLAS_MOCK_MODELS=1 switches to the random
+# placeholder below, ONLY for developing the app on a machine without PyTorch / the model files (every result is then
+# labelled "MOCK RESULT").  If the real models cannot be loaded the analysis fails with an explanation; it never falls
+# back to random numbers by itself.
+MODELS_ARE_MOCK = _env_flag("ATLAS_MOCK_MODELS", False)
+
+_RECOMMENDATION = {
+    0: "Negative. Routine screening as per guidelines.",
+    1: "Benign finding. Routine screening as per guidelines.",
+    2: "Probably benign. Short-interval follow-up imaging is usually recommended.",
+    3: "Suspicious abnormality. Tissue sampling (biopsy) should be considered.",
+    4: "Highly suggestive of malignancy. Appropriate action (biopsy) should be taken.",
+}
+
+
+def run_models(slot_canvases, sides):
+    """Runs the AI.
+
+    slot_canvases: {('L','CC'): uint8[1280, 800], ('L','MLO'): ..., ('R','CC'): ..., ('R','MLO'): ...}
+        always all four inputs, produced by atlas_preprocess.process_image + fill_slots (the same thing the
+        training notebook's predict_exam_files feeds to the networks).
+    sides: the sides ('L' / 'R') that have at least one real view; only these get a result.
+    returns {'L': [P(B1), P(B2), P(B3), P(B4), P(B5)], 'R': [...]}  (each list sums to 1)
+
+    Real mode: atlas_models.run_ensemble (15 networks, weighted average, see atlas_models.py).
+    Mock mode (ATLAS_MOCK_MODELS=1): a random placeholder.
+    """
+    if not MODELS_ARE_MOCK:
+        return atlas_models.run_ensemble(slot_canvases, sides)
+    rng = np.random.default_rng()
+    return {s: [float(x) for x in rng.dirichlet([6.0, 6.0, 1.2, 1.5, 0.6])] for s in sides}
+
+
+def _format_result(probs):
+    k = int(np.argmax(probs))
+    return {
+        'classification': BIRADS[k],
+        'confidence': f"{100.0 * probs[k]:.1f}%",
+        'probabilities': '  '.join(f"B{i + 1} {100.0 * p:.0f}%" for i, p in enumerate(probs)),
+        'recommendation': ('MOCK RESULT: the AI models are not connected yet. Consult a healthcare provider for '
+                           'next steps.' if MODELS_ARE_MOCK else _RECOMMENDATION[k]),
+        '_k': k,
+    }
+
+
+@app.route('/analyze', methods=['POST'])
+def analyze():
+    """Run the AI on the views that were captured / imported (1 to 4 of them)."""
+    data = request.get_json(silent=True) or {}
+    try:
+        scan_id = _clean_scan_id(data.get('scan_id'))
+    except ValueError as exc:
+        return jsonify({'error': str(exc)}), 400
+    views = data.get('views')
+    if not isinstance(views, list) or not views:
+        return jsonify({'error': 'No views to analyse.'}), 400
+
+    canvases = {}
+    for item in views:
+        try:
+            side = _clean_side(item.get('side'))
+            view = _clean_view(item.get('view'))
+            path = _inside(SAVE_DIR, str(item.get('image_path') or ''))
+        except (ValueError, AttributeError) as exc:
+            return jsonify({'error': str(exc)}), 400
+        res = atlas_preprocess.process_image(path)  # exactly the notebook's preprocessing
+        if res is None:
+            return jsonify({'error': f'Could not read the {side} {view} image.'}), 422
+        canvases[(side[0], view)] = res[0]
+
+    slots = atlas_preprocess.fill_slots({key: key for key in canvases})  # copies a missing view from a neighbour
+    model_inputs = {slot: canvases[source] for slot, source in slots.items()}
+    sides = sorted({side for side, _view in canvases})  # only breasts with at least one real view get a result
+    # Report only the copies that influence a result.  A breast that was marked "not available" is still filled with
+    # the other breast's views (the model always gets four inputs) but no result is produced for it.
+    substituted = [f"{SIDE_NAME[s[0]]} {s[1]} <- {SIDE_NAME[src[0]]} {src[1]}"
+                   for s, src in slots.items() if s != src and s[0] in sides]
+
+    if SAVE_DEBUG:  # what the networks really get: handy for the thesis figures and for debugging
+        out_dir = os.path.join(SAVE_DIR, scan_id, "model_input")
+        os.makedirs(out_dir, exist_ok=True)
+        for (side, view), canvas in model_inputs.items():
+            cv2.imwrite(os.path.join(out_dir, f"{side}_{view}.png"), canvas)
+
+    try:
+        probs = run_models(model_inputs, sides)
+    except Exception as exc:
+        traceback.print_exc()
+        return jsonify({'error': f'The AI models failed: {exc}'}), 500
+
+    results = {SIDE_NAME[s]: _format_result(probs[s]) for s in sides}
+    worst_side = max(results, key=lambda name: (results[name]['_k'], float(results[name]['confidence'].rstrip('%'))))
+    combined = {k: v for k, v in results[worst_side].items() if k != '_k'}
+    combined['basis'] = f"{worst_side} breast" if len(results) > 1 else f"{worst_side} breast only"
+    for r in results.values():
+        r.pop('_k', None)
+
+    note = ''
+    if substituted:
+        note = ("A view was missing, so the AI used a copy of the other view of the same breast instead ("
+                + ', '.join(substituted) + "). The result for that breast is less reliable.")
+    return jsonify({
+        'status': 'success',
+        'mock': MODELS_ARE_MOCK,
+        'results': results,
+        'combined': combined,
+        'note': note,
+        'substituted': substituted,
+    })
+
+
+_init_camera()
+if not MODELS_ARE_MOCK:
+    atlas_models.preload_in_background()   # load the networks while the operator captures the views
 
 if __name__ == '__main__':
     app.run(host='127.0.0.1', port=5000, threaded=True)

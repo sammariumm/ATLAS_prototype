@@ -1,0 +1,109 @@
+{
+ "arch": "resnet50_in",
+ "img_h": 1280,
+ "img_w": 800,
+ "use_clahe": true,
+ "members": [
+  {
+   "arch": "resnet50_in",
+   "dir": "/content/drive/MyDrive/ATLAS_Models/v2_resnet50_in",
+   "folds": [
+    0,
+    1,
+    2,
+    3,
+    4
+   ]
+  },
+  {
+   "arch": "densenet121_in",
+   "dir": "/content/drive/MyDrive/ATLAS_Models/v2_densenet121_in",
+   "folds": [
+    0,
+    1,
+    2,
+    3,
+    4
+   ]
+  },
+  {
+   "arch": "inception_v3_in",
+   "dir": "/content/drive/MyDrive/ATLAS_Models/v2_inception_v3_in",
+   "folds": [
+    0,
+    1,
+    2,
+    3,
+    4
+   ]
+  }
+ ],
+ "combine": "wa",
+ "calibration": {
+  "w": [
+   0.44859969950716977,
+   0.1980303320948177,
+   0.3533699683980125
+  ]
+ },
+ "decide": "five",
+ "schemes": {
+  "5-class": {
+   "groups": [
+    [
+     0
+    ],
+    [
+     1
+    ],
+    [
+     2
+    ],
+    [
+     3
+    ],
+    [
+     4
+    ]
+   ],
+   "offsets": [
+    0.0,
+    0.0,
+    0.0,
+    0.0,
+    0.0
+   ],
+   "test_macro_auc": 0.8690442779090437,
+   "precision": 0.6832264024267729,
+   "recall": 0.45680468496525234,
+   "f1": 0.4727498673740054
+  },
+  "4-class  B1 | B2+B3 | B4 | B5": {
+   "groups": [
+    [
+     0
+    ],
+    [
+     1,
+     2
+    ],
+    [
+     3
+    ],
+    [
+     4
+    ]
+   ],
+   "offsets": [
+    0.0,
+    0.0,
+    0.0,
+    0.0
+   ],
+   "test_macro_auc": 0.8894248668785139,
+   "precision": 0.6581851516978099,
+   "recall": 0.5475494684881155,
+   "f1": 0.5598176229508197
+  }
+ }
+}
