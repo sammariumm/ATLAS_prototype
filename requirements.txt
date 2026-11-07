@@ -1,0 +1,30 @@
+# Python packages for the ATLAS-BC backend (app.py).
+#
+# On the Raspberry Pi the systemd unit runs the SYSTEM Python (/usr/bin/python3), and Picamera2 only exists as an
+# apt package, so install the packages with apt there (see deploy/README.md, step 3):
+#   sudo apt install -y python3-flask python3-numpy python3-opencv python3-pydicom python3-picamera2
+#
+# On a development PC:   pip install -r requirements.txt
+
+flask>=2.2
+numpy>=1.24
+opencv-python-headless>=4.8   # or opencv-python.  On the Pi the apt package python3-opencv provides cv2.
+pydicom>=2.3                  # reads DICOM softcopies (2.3, 2.4 and 3.x are all supported)
+Pillow>=9.0                   # optional: fallback reader for unusual TIFF / GIF / palette images
+
+# The AI (atlas_models.py).  On a development PC:  pip install torch torchvision
+# On the Raspberry Pi (64-bit OS):  sudo pip3 install --break-system-packages torch torchvision   (deploy/README.md, 3b)
+# Without them the backend still runs with ATLAS_MOCK_MODELS=1 (random placeholder, development only).
+torch>=2.2
+torchvision>=0.17
+
+# Optional: decoders for COMPRESSED DICOM (JPEG, JPEG-LS, JPEG 2000).  Uncompressed DICOM does not need them.
+pylibjpeg
+pylibjpeg-libjpeg
+pylibjpeg-openjpeg
+
+# picamera2 is Raspberry Pi only and comes from apt (python3-picamera2); without it the backend falls back to a
+# USB webcam through OpenCV, which is handy for development.
+
+# Tests:   python3 -m pytest backend_tests
+pytest>=7.0

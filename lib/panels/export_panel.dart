@@ -6,21 +6,24 @@ import 'package:pdf/widgets.dart' as pw;
 import '../services/backend_service.dart';
 
 class ExportPanel extends StatefulWidget {
+  /// The four views of the exam in the order Left CC, Left MLO, Right CC, Right MLO (empty until the AI has run).
   final List<Map<String, dynamic>> scanData;
   final String? scanId;
-  final Map<String, String>? ccResult;   // CHANGED
-  final Map<String, String>? mloResult;  // CHANGED
+  final Map<String, String>? leftResult;  // null = left breast not available
+  final Map<String, String>? rightResult; // null = right breast not available
   final Map<String, String>? combinedResult;
-  final VoidCallback onNewPatient; 
+  final String note;
+  final VoidCallback onNewPatient;
 
   const ExportPanel({
     super.key,
     required this.scanData,
     this.scanId,
-    this.ccResult,  // CHANGED
-    this.mloResult, // CHANGED
+    this.leftResult,
+    this.rightResult,
     this.combinedResult,
-    required this.onNewPatient, 
+    this.note = '',
+    required this.onNewPatient,
   });
 
   @override
@@ -33,95 +36,134 @@ class _ExportPanelState extends State<ExportPanel> {
   bool _isSendingEmail = false;
   String? _savedPdfPath;
 
+  bool get _hasResult => widget.combinedResult != null && widget.scanData.isNotEmpty;
+
+  @override
+  void didUpdateWidget(ExportPanel oldWidget) {
+    super.didUpdateWidget(oldWidget);
+    // A new analysis makes a PDF that was generated earlier out of date: it must be generated again before emailing.
+    if (!identical(oldWidget.combinedResult, widget.combinedResult) ||
+        !identical(oldWidget.leftResult, widget.leftResult) ||
+        !identical(oldWidget.rightResult, widget.rightResult)) {
+      _savedPdfPath = null;
+    }
+  }
+
+  @override
+  void dispose() {
+    _emailController.dispose();
+    super.dispose();
+  }
+
+  /// The picture put in the PDF: the JPEG preview (the PDF library cannot read 16-bit PNGs), else the PNG.
+  String _pdfImagePath(Map<String, dynamic> scan) {
+    final String preview = (scan['preview_path'] ?? '').toString();
+    if (preview.isNotEmpty) return preview;
+    return (scan['image_path'] ?? '').toString();
+  }
+
+  /// One picture box of the report: the label, then the picture, or a grey "NOT AVAILABLE" box.
+  pw.Widget _pdfViewBox(String label, pw.MemoryImage? image) {
+    return pw.Expanded(
+      child: pw.Column(
+        crossAxisAlignment: pw.CrossAxisAlignment.start,
+        children: [
+          pw.Text(label, style: const pw.TextStyle(fontWeight: pw.FontWeight.bold, fontSize: 11)),
+          pw.SizedBox(height: 4),
+          pw.Container(
+            height: 180,
+            alignment: pw.Alignment.center,
+            decoration: const pw.BoxDecoration(color: PdfColors.grey200),
+            child: image != null
+                ? pw.Image(image, fit: pw.BoxFit.contain)
+                : pw.Text('NOT AVAILABLE', style: const pw.TextStyle(fontSize: 11, color: PdfColors.grey700)),
+          ),
+        ],
+      ),
+    );
+  }
+
+  /// One breast: its result and its two views.
+  pw.Widget _pdfBreastSection(String side, Map<String, String>? result, Map<String, pw.MemoryImage> images) {
+    return pw.Column(
+      crossAxisAlignment: pw.CrossAxisAlignment.start,
+      children: [
+        pw.Text('${side.toUpperCase()} BREAST', style: const pw.TextStyle(fontSize: 16, fontWeight: pw.FontWeight.bold)),
+        pw.Divider(),
+        pw.Text(
+          result != null
+              ? 'Result: ${result['classification'] ?? 'N/A'}     Confidence: ${result['confidence'] ?? 'N/A'}'
+              : 'Not available: no image of this breast was provided.',
+        ),
+        pw.SizedBox(height: 8),
+        pw.Row(
+          crossAxisAlignment: pw.CrossAxisAlignment.start,
+          children: [
+            _pdfViewBox('$side CC', images['$side-CC']),
+            pw.SizedBox(width: 16),
+            _pdfViewBox('$side MLO', images['$side-MLO']),
+          ],
+        ),
+      ],
+    );
+  }
+
   Future<void> _generatePDF() async {
-    if (widget.scanData.length < 2 || widget.scanId == null) return;
+    if (!_hasResult || widget.scanId == null) return;
     setState(() => _isGeneratingPDF = true);
 
     try {
       final pdf = pw.Document();
 
-      // 1. SAFELY search for the CC and MLO images
-      String? ccImagePath;
-      String? mloImagePath;
-      String? scannedSide; // To determine if this is a Left or Right breast report
-      
-      for (var scan in widget.scanData) {
-        if (scan['view'] == 'CC') {
-          ccImagePath = scan['image_path'];
-          scannedSide = scan['side']; // Capture which side this is for the PDF title
+      // 1. Load the pictures that exist. A view marked "not available" has no picture (and a picture that
+      //    cannot be read is left out instead of stopping the whole report).
+      final Map<String, pw.MemoryImage> images = {};
+      for (final scan in widget.scanData) {
+        final String path = _pdfImagePath(scan);
+        if (scan['status'] != 'captured' || path.isEmpty) continue;
+        try {
+          images['${scan['side']}-${scan['view']}'] = pw.MemoryImage(File(path).readAsBytesSync());
+        } catch (e) {
+          debugPrint('Could not add $path to the PDF: $e');
         }
-        if (scan['view'] == 'MLO') mloImagePath = scan['image_path'];
       }
 
-      if (ccImagePath == null || mloImagePath == null) {
-        throw Exception('Missing CC or MLO scan. Please capture both views.');
-      }
-
-      final ccImageFile = File(ccImagePath);
-      final mloImageFile = File(mloImagePath);
-      
-      final ccImage = pw.MemoryImage(ccImageFile.readAsBytesSync());
-      final mloImage = pw.MemoryImage(mloImageFile.readAsBytesSync());
+      final String basis = widget.combinedResult?['basis'] ?? '';
 
       pdf.addPage(
         pw.MultiPage(
           pageFormat: PdfPageFormat.a4,
           build: (context) => [
-            pw.Header(level: 0, child: pw.Text('ATLAS-BC: Mammography Analysis', style: pw.TextStyle(fontSize: 24, fontWeight: pw.FontWeight.bold))),
+            pw.Header(level: 0, child: pw.Text('ATLAS-BC: Mammography Analysis', style: const pw.TextStyle(fontSize: 24, fontWeight: pw.FontWeight.bold))),
             pw.Text('Scan ID: ${widget.scanId} | Date: ${DateTime.now().toString().split('.')[0]}'),
-            pw.SizedBox(height: 20),
-            
+            pw.SizedBox(height: 16),
+
             pw.Container(
               padding: const pw.EdgeInsets.all(12),
               color: PdfColors.grey200,
               child: pw.Column(
                 crossAxisAlignment: pw.CrossAxisAlignment.start,
                 children: [
-                  pw.Text('OVERALL UNILATERAL DIAGNOSIS: ${scannedSide?.toUpperCase() ?? ''} BREAST', style: pw.TextStyle(fontSize: 14, fontWeight: pw.FontWeight.bold)),
+                  pw.Text('OVERALL BILATERAL DIAGNOSIS', style: const pw.TextStyle(fontSize: 14, fontWeight: pw.FontWeight.bold)),
                   pw.SizedBox(height: 8),
-                  pw.Text('Classification: ${widget.combinedResult?['classification'] ?? 'N/A'}', style: pw.TextStyle(fontSize: 22, color: PdfColors.red800, fontWeight: pw.FontWeight.bold)),
+                  pw.Text('Classification: ${widget.combinedResult?['classification'] ?? 'N/A'}', style: const pw.TextStyle(fontSize: 22, color: PdfColors.red800, fontWeight: pw.FontWeight.bold)),
                   pw.Text('Confidence: ${widget.combinedResult?['confidence'] ?? 'N/A'}'),
+                  if (basis.isNotEmpty) pw.Text('Based on: $basis'),
                 ]
               )
             ),
-            pw.SizedBox(height: 20),
+            if (widget.note.isNotEmpty) ...[
+              pw.SizedBox(height: 8),
+              pw.Text('Note: ${widget.note}', style: const pw.TextStyle(fontSize: 11)),
+            ],
+            pw.SizedBox(height: 16),
 
-            pw.Text('Individual Views', style: pw.TextStyle(fontSize: 18, fontWeight: pw.FontWeight.bold)),
-            pw.Divider(),
-            pw.Row(
-              mainAxisAlignment: pw.MainAxisAlignment.spaceBetween,
-              crossAxisAlignment: pw.CrossAxisAlignment.start,
-              children: [
-                pw.Expanded(
-                  child: pw.Column(
-                    crossAxisAlignment: pw.CrossAxisAlignment.start,
-                    children: [
-                      pw.Text('CC VIEW', style: pw.TextStyle(fontWeight: pw.FontWeight.bold)),
-                      pw.Text('Result: ${widget.ccResult?['classification'] ?? 'N/A'}'),
-                      pw.Text('Confidence: ${widget.ccResult?['confidence'] ?? 'N/A'}'),
-                      pw.SizedBox(height: 10),
-                      pw.Image(ccImage, height: 200)
-                    ]
-                  )
-                ),
-                pw.SizedBox(width: 20),
-                pw.Expanded(
-                  child: pw.Column(
-                    crossAxisAlignment: pw.CrossAxisAlignment.start,
-                    children: [
-                      pw.Text('MLO VIEW', style: pw.TextStyle(fontWeight: pw.FontWeight.bold)),
-                      pw.Text('Result: ${widget.mloResult?['classification'] ?? 'N/A'}'),
-                      pw.Text('Confidence: ${widget.mloResult?['confidence'] ?? 'N/A'}'),
-                      pw.SizedBox(height: 10),
-                      pw.Image(mloImage, height: 200)
-                    ]
-                  )
-                ),
-              ]
-            ),
-            pw.SizedBox(height: 30),
+            _pdfBreastSection('Left', widget.leftResult, images),
+            pw.SizedBox(height: 16),
+            _pdfBreastSection('Right', widget.rightResult, images),
+            pw.SizedBox(height: 24),
 
-            pw.Text('Patient Next Steps', style: pw.TextStyle(fontSize: 18, fontWeight: pw.FontWeight.bold)),
+            pw.Text('Patient Next Steps', style: const pw.TextStyle(fontSize: 18, fontWeight: pw.FontWeight.bold)),
             pw.Divider(),
             pw.Text(widget.combinedResult?['recommendation'] ?? 'Consult healthcare provider for further evaluation.', style: const pw.TextStyle(fontSize: 14)),
           ],
@@ -132,7 +174,7 @@ class _ExportPanelState extends State<ExportPanel> {
       final file = File('${outputDir.path}/ATLAS_${widget.scanId}.pdf');
       await file.writeAsBytes(await pdf.save());
 
-      setState(() => _savedPdfPath = file.path);
+      if (mounted) setState(() => _savedPdfPath = file.path);
 
       if (mounted) ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text('PDF Saved: ${file.path}'), backgroundColor: const Color(0xFF0D9488)));
     } catch (e) {
@@ -161,7 +203,7 @@ class _ExportPanelState extends State<ExportPanel> {
 
   @override
   Widget build(BuildContext context) {
-    final bool canGenerate = widget.scanData.length >= 2 && widget.scanId != null;
+    final bool canGenerate = _hasResult && widget.scanId != null;
 
     return Padding(
       padding: const EdgeInsets.all(12.0),
@@ -180,7 +222,11 @@ class _ExportPanelState extends State<ExportPanel> {
                   const SizedBox(height: 8),
                   Text('Report: ${widget.scanId ?? 'Pending'}', textAlign: TextAlign.center, style: const TextStyle(color: Colors.white, fontSize: 16, fontWeight: FontWeight.bold)),
                   const SizedBox(height: 4),
-                  Text(_savedPdfPath != null ? 'PDF Generated' : 'Data Ready', textAlign: TextAlign.center, style: TextStyle(color: _savedPdfPath != null ? const Color(0xFF0D9488) : Colors.white54, fontSize: 14)),
+                  Text(
+                    _savedPdfPath != null ? 'PDF Generated' : (_hasResult ? 'Data Ready' : 'Waiting for the analysis'),
+                    textAlign: TextAlign.center,
+                    style: TextStyle(color: _savedPdfPath != null ? const Color(0xFF0D9488) : Colors.white54, fontSize: 14),
+                  ),
                   const Spacer(),
                   ElevatedButton.icon(
                     style: ElevatedButton.styleFrom(backgroundColor: const Color(0xFF0D9488), padding: const EdgeInsets.symmetric(vertical: 16)),
@@ -228,7 +274,7 @@ class _ExportPanelState extends State<ExportPanel> {
             ),
           ),
           const SizedBox(height: 12),
-          
+
           // NEW: BIG Reset Button at the bottom
           ElevatedButton.icon(
             style: ElevatedButton.styleFrom(

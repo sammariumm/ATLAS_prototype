@@ -7,6 +7,12 @@ Type=simple
 User=raspi
 WorkingDirectory=/home/raspi/app_prototype
 ExecStart=/usr/bin/python3 /home/raspi/app_prototype/app.py
+# Optional settings (the list is in deploy/README.md). Prefer `sudo systemctl edit atlas-backend.service`.
+#Environment=ATLAS_CAMERA_ROTATION=90
+#Environment=ATLAS_INBOX_DIR=/home/raspi/atlas_inbox
+#Environment=ATLAS_EXPOSURE_US=8000
+#Environment=ATLAS_MODELS_DIR=/home/raspi/app_prototype/models
+#Environment=ATLAS_ANALOGUE_GAIN=1.0
 Restart=on-failure
 RestartSec=2
 

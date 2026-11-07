@@ -9,7 +9,7 @@ import 'services/database_helper.dart';
 
 void main() async {
   WidgetsFlutterBinding.ensureInitialized();
-  
+
   if (Platform.isWindows || Platform.isLinux) {
     sqfliteFfiInit();
     databaseFactory = databaseFactoryFfi;
@@ -34,8 +34,8 @@ class AtlasBcApp extends StatelessWidget {
         backgroundColor: Colors.black87,
         body: Center(
           child: SizedBox(
-            width: 480, 
-            height: 800, 
+            width: 480,
+            height: 800,
             child: ClipRect(child: MainLayout()),
           ),
         ),
@@ -53,14 +53,21 @@ class MainLayout extends StatefulWidget {
 
 class _MainLayoutState extends State<MainLayout> {
   int _currentIndex = 0;
-  final List<Map<String, dynamic>> _scanData = [];
   int _scanCounter = 1;
   String _currentScanId = 'SCAN-0001';
 
-  // CHANGED: Tracking views (CC/MLO) instead of sides
-  Map<String, String>? _aiCCResult;
-  Map<String, String>? _aiMLOResult;
-  Map<String, String>? _aiCombinedResult;
+  // CHANGED: a scan is now a bilateral exam. _scanData holds all four views (Left CC, Left MLO, Right CC,
+  // Right MLO) once the AI has analysed them; a view that does not exist has status 'na' and no image.
+  List<Map<String, dynamic>> _scanData = [];
+
+  // CHANGED: one result per breast (null = that breast was not available) plus the overall result.
+  Map<String, String>? _leftResult;
+  Map<String, String>? _rightResult;
+  Map<String, String>? _combinedResult;
+  String _analysisNote = '';
+
+  // Changes with every new patient so the three panels start clean (no leftover pictures, verdicts or PDFs).
+  int _sessionKey = 0;
 
   @override
   void initState() {
@@ -74,10 +81,10 @@ class _MainLayoutState extends State<MainLayout> {
       if (lastScanId != null && lastScanId.startsWith('SCAN-')) {
         final numericString = lastScanId.substring(5);
         final lastCount = int.tryParse(numericString);
-        
+
         if (lastCount != null) {
           setState(() {
-            _scanCounter = lastCount + 1; 
+            _scanCounter = lastCount + 1;
             _currentScanId = 'SCAN-${_scanCounter.toString().padLeft(4, '0')}';
           });
         }
@@ -89,34 +96,34 @@ class _MainLayoutState extends State<MainLayout> {
 
   void _resetSession() {
     setState(() {
-      _scanData.clear();
-      _aiCCResult = null;
-      _aiMLOResult = null;
-      _aiCombinedResult = null;
-      _currentIndex = 0; 
-      
+      _scanData = [];
+      _leftResult = null;
+      _rightResult = null;
+      _combinedResult = null;
+      _analysisNote = '';
+      _currentIndex = 0;
+      _sessionKey++;
+
       _scanCounter++;
       _currentScanId = 'SCAN-${_scanCounter.toString().padLeft(4, '0')}';
     });
   }
 
-  void _handleImageCaptured(String imagePath, String side, String view, Map<String, String> aiResult) {
+  // CHANGED: called by the camera panel once the AI has analysed the captured / imported views.
+  void _handleAnalysisComplete(
+    List<Map<String, dynamic>> scanData,
+    Map<String, String>? leftResult,
+    Map<String, String>? rightResult,
+    Map<String, String>? combinedResult,
+    String note,
+  ) {
     setState(() {
-      _scanData.add({'image_path': imagePath, 'side': side, 'view': view});
-      
-      // CHANGED: Save AI results based on View
-      if (view == 'CC') _aiCCResult = aiResult;
-      if (view == 'MLO') _aiMLOResult = aiResult;
-
-      // Trigger completion when we have 2 images (CC and MLO)
-      if (_scanData.length >= 2) {
-        _aiCombinedResult = {
-          'classification': (_aiCCResult?['classification'] == 'BI-RADS 4' || _aiMLOResult?['classification'] == 'BI-RADS 4') ? 'BI-RADS 4' : 'BI-RADS 1',
-          'confidence': _aiCCResult?['confidence'] ?? '90%',
-          'recommendation': 'Unilateral analysis complete. Consult healthcare provider for next steps.',
-        };
-        _currentIndex = 1; 
-      }
+      _scanData = scanData;
+      _leftResult = leftResult;
+      _rightResult = rightResult;
+      _combinedResult = combinedResult;
+      _analysisNote = note;
+      _currentIndex = 1;
     });
   }
 
@@ -124,25 +131,30 @@ class _MainLayoutState extends State<MainLayout> {
   Widget build(BuildContext context) {
     final List<Widget> panels = [
       CameraPanel(
-        scanData: _scanData,
-        currentScanId: _currentScanId, 
-        onImageCaptured: _handleImageCaptured,
+        key: ValueKey('camera-$_sessionKey'),
+        currentScanId: _currentScanId,
+        onAnalysisComplete: _handleAnalysisComplete,
         onReset: _resetSession,
+        isActive: _currentIndex == 0, // the live stream only runs while this tab is showing
       ),
       ResultsPanel(
+        key: ValueKey('results-$_sessionKey'),
         scanData: _scanData,
         scanId: _currentScanId,
-        ccResult: _aiCCResult,    // CHANGED
-        mloResult: _aiMLOResult,  // CHANGED
-        combinedResult: _aiCombinedResult,
+        leftResult: _leftResult,
+        rightResult: _rightResult,
+        combinedResult: _combinedResult,
+        note: _analysisNote,
         onNewPatient: _resetSession,
       ),
       ExportPanel(
+        key: ValueKey('export-$_sessionKey'),
         scanData: _scanData,
         scanId: _currentScanId,
-        ccResult: _aiCCResult,    // CHANGED
-        mloResult: _aiMLOResult,  // CHANGED
-        combinedResult: _aiCombinedResult,
+        leftResult: _leftResult,
+        rightResult: _rightResult,
+        combinedResult: _combinedResult,
+        note: _analysisNote,
         onNewPatient: _resetSession,
       ),
     ];
@@ -150,7 +162,7 @@ class _MainLayoutState extends State<MainLayout> {
     return Scaffold(
       body: IndexedStack(index: _currentIndex, children: panels),
       bottomNavigationBar: SizedBox(
-        height: 70, 
+        height: 70,
         child: BottomNavigationBar(
           currentIndex: _currentIndex,
           onTap: (index) => setState(() => _currentIndex = index),
