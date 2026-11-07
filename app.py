@@ -1,7 +1,9 @@
+import glob
 import os
 import re
 import stat
 import sys
+import textwrap
 import time
 import threading
 import traceback
@@ -53,6 +55,9 @@ def _parse_size(text, default):
 
 # ATLAS_CAMERA=none -> do not open any camera (softcopy-only machine, tests)
 CAMERA_MODE = os.environ.get("ATLAS_CAMERA", "auto").strip().lower()
+# USB webcam (a PC, or a Pi without the CSI camera): "" = use the first /dev/video* that gives a picture,
+# or a number (0, 1, ...) or a device path (/dev/video2) to force one.
+CAMERA_INDEX = os.environ.get("ATLAS_CAMERA_INDEX", "").strip()
 
 # Camera size.  1640x1232 is the Camera Module 2's full-field-of-view 2x2-binned mode (4:3).  The old 1280x720
 # is a cropped 16:9 mode, which loses field of view and resolution for a portrait film.
@@ -153,9 +158,81 @@ def _lock_opencv_exposure():
         traceback.print_exc()
 
 
+# What the camera is doing, shown by /health and written onto the stream picture when there is no picture.
+# state: "starting" | "ok" | "off" (ATLAS_CAMERA=none) | "not_found" | "read_failed"
+CAMERA_STATUS = {"state": "starting", "detail": ""}
+_camera_ok_detail = ""
+
+
+def _set_camera_status(state, detail):
+    CAMERA_STATUS["state"], CAMERA_STATUS["detail"] = state, detail
+
+
+def _webcam_candidates():
+    """The webcams to try: the forced one, else every /dev/video* node (Linux) or the indices 0 to 2."""
+    if CAMERA_INDEX:
+        return [int(CAMERA_INDEX) if CAMERA_INDEX.isdigit() else CAMERA_INDEX]
+    if sys.platform.startswith("linux"):
+        return sorted(glob.glob("/dev/video[0-9]*"), key=lambda path: int(re.sub(r"\D", "", path) or 0))
+    return [0, 1, 2]
+
+
+def _open_webcam():
+    """Opens the first webcam that really delivers a picture.  Returns (VideoCapture or None, text).
+
+    A /dev/video node can exist and even open and still never deliver a frame (a laptop's metadata node), so a
+    camera only counts when a frame was read from it."""
+    candidates = _webcam_candidates()
+    if not candidates:
+        return None, ("No /dev/video* device exists. Is the webcam plugged in? "
+                      "(on Linux, `ls /dev/video*` must list it)")
+    backend = cv2.CAP_V4L2 if sys.platform.startswith("linux") else cv2.CAP_ANY
+    problems = []
+    for source in candidates:
+        cap = cv2.VideoCapture(source, backend)
+        if not cap.isOpened():
+            cap.release()
+            problems.append(f"{source} cannot be opened (in use by another program, or no permission: "
+                            f"is your user in the 'video' group?)")
+            continue
+        got = False
+        for _ in range(8):
+            ok, frame = cap.read()
+            if ok and frame is not None and frame.size:
+                got = True
+                break
+        if not got:
+            cap.release()
+            problems.append(f"{source} opens but delivers no picture")
+            continue
+        cap.set(cv2.CAP_PROP_FRAME_WIDTH, CAMERA_SIZE[0])
+        cap.set(cv2.CAP_PROP_FRAME_HEIGHT, CAMERA_SIZE[1])
+        w, h = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH)), int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
+        return cap, f"USB webcam {source}, {w}x{h}"
+    return None, "Tried: " + "; ".join(problems) + "."
+
+
+def _init_webcam(picamera_problem=None):
+    global camera, CAMERA_BACKEND, _camera_ok_detail
+    cap, text = _open_webcam()
+    if cap is None:
+        message = text
+        if picamera_problem:
+            message = f"The Raspberry Pi camera could not be opened ({picamera_problem}). " + text
+        _set_camera_status("not_found", "No camera found. " + message)
+        print(">>> No camera found. " + message, flush=True)
+        return
+    camera, CAMERA_BACKEND, _camera_ok_detail = cap, "opencv", text
+    _set_camera_status("ok", text)
+    _lock_opencv_exposure()
+    print("Camera backend: OpenCV VideoCapture (" + text + ")", flush=True)
+
+
 def _init_camera():
-    global USE_PICAMERA2, CAMERA_BACKEND, picam2, camera
+    global USE_PICAMERA2, CAMERA_BACKEND, picam2, _camera_ok_detail
     if CAMERA_MODE == "none":
+        _set_camera_status("off", "The camera is switched off (ATLAS_CAMERA=none: softcopy only). "
+                                  "Start the backend without that setting to use a camera.")
         print(">>> ATLAS_CAMERA=none: no camera opened (softcopy only).", flush=True)
         return
     print(">>> Initializing camera backend...", flush=True)
@@ -175,21 +252,20 @@ def _init_camera():
         picam2.start()
         USE_PICAMERA2 = True
         CAMERA_BACKEND = "picamera2"
+        _camera_ok_detail = "Raspberry Pi camera (Picamera2), %dx%d" % tuple(CAMERA_SIZE)
+        _set_camera_status("ok", _camera_ok_detail)
         _lock_picamera_exposure()
         print("Camera backend: Picamera2 (libcamera / CSI Camera Module 2), size %s, rotation %d deg CCW"
               % (CAMERA_SIZE, CAMERA_ROTATION), flush=True)
-    except Exception:
+    except ImportError as exc:
+        print(">>> Picamera2 is not available here (%s): looking for a USB webcam (normal on a PC)." % exc,
+              flush=True)
+        _init_webcam()
+    except Exception as exc:
         print(">>> Picamera2 init failed with exception:", file=sys.stderr, flush=True)
         traceback.print_exc()
         print("Falling back to OpenCV VideoCapture", flush=True)
-        camera = cv2.VideoCapture(0)
-        if not camera.isOpened():
-            camera = cv2.VideoCapture(1)
-        camera.set(cv2.CAP_PROP_FRAME_WIDTH, CAMERA_SIZE[0])
-        camera.set(cv2.CAP_PROP_FRAME_HEIGHT, CAMERA_SIZE[1])
-        CAMERA_BACKEND = "opencv"
-        _lock_opencv_exposure()
-        print("Camera backend: OpenCV VideoCapture (USB webcam)", flush=True)
+        _init_webcam(picamera_problem=str(exc) or type(exc).__name__)
 
 
 _ROTATE_CODES = {
@@ -212,14 +288,20 @@ def read_frame():
         except Exception:
             print(">>> Picamera2 capture error:", file=sys.stderr, flush=True)
             traceback.print_exc()
+            _set_camera_status("read_failed", "The camera was opened but gives no picture "
+                                              "(cable, power, or another program is using it).")
             return False, None
     elif camera is not None:
         with _camera_lock:
             ok, frame = camera.read()
         if not ok:
+            _set_camera_status("read_failed", "The camera was opened but gives no picture "
+                                              "(unplugged, or another program is using it).")
             return False, None
     else:
         return False, None
+    if CAMERA_STATUS["state"] != "ok":
+        _set_camera_status("ok", _camera_ok_detail)
     return True, rotate_frame(frame)
 
 
@@ -241,12 +323,23 @@ def grab_still(n=None):
 PREVIEW_MAX_SIDE = 640
 
 
+def _no_picture_frame():
+    """What the live view shows when there is no camera picture: the reason, in words."""
+    frame = np.zeros((640, 480, 3), dtype=np.uint8)
+    title = {"off": "CAMERA OFF", "not_found": "NO CAMERA FOUND"}.get(CAMERA_STATUS["state"], "CAMERA ERROR")
+    cv2.putText(frame, title, (30, 80), cv2.FONT_HERSHEY_SIMPLEX, 1.0, (0, 0, 255), 2)
+    y = 130
+    for line in textwrap.wrap(CAMERA_STATUS["detail"] or "No picture from the camera.", 36)[:16]:
+        cv2.putText(frame, line, (30, y), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (255, 255, 255), 1)
+        y += 26
+    return frame
+
+
 def generate_frames():
     while True:
         success, frame = read_frame()
         if not success or frame is None:
-            frame = np.zeros((640, 480, 3), dtype=np.uint8)
-            cv2.putText(frame, "CAMERA ERROR", (40, 320), cv2.FONT_HERSHEY_SIMPLEX, 1.0, (0, 0, 255), 3)
+            frame = _no_picture_frame()
             time.sleep(0.2)
 
         # keep the aspect ratio: the picture is portrait after the rotation
@@ -317,6 +410,7 @@ def video_feed():
 def health():
     return jsonify({
         'camera': CAMERA_BACKEND,
+        'camera_status': dict(CAMERA_STATUS),
         'camera_size': list(CAMERA_SIZE),
         'rotation_ccw_deg': CAMERA_ROTATION,
         'exposure': EXPOSURE_STATE,
