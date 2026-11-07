@@ -216,6 +216,13 @@ The file type is recognised from its content, not its extension. The converted P
   (`sudo systemctl stop atlas-backend.service`), and start it again afterwards
   (`sudo systemctl start atlas-backend.service`). To see what holds the camera: `pgrep -af "app.py|rpicam|libcamera"`.
   After copying new files to the Pi, `sudo systemctl restart atlas-backend.service` makes the service use them.
+* **"Camera frontend has timed out".** libcamera finds the sensor (`Adding camera ... imx219`) but no picture ever
+  arrives. This is hardware: the ribbon cable is not fully seated at one end, is damaged, or is too long; a weak power
+  supply can do it too (`vcgencmd get_throttled` should print `0x0`). `rpicam-hello -t 5000` fails the same way when it
+  is the hardware, whatever the backend does. Power the Pi off, reseat the cable at both ends (CAMERA port, not
+  DISPLAY), or try another cable. The backend still starts in this state and the live view says *CAMERA ERROR*; it
+  works again by itself once pictures arrive (no restart needed for the live view; restart the service to also get the
+  fixed exposure).
 * **No live view?** The stream tells you why in words: *CAMERA OFF* (switched off with `ATLAS_CAMERA=none`),
   *NO CAMERA FOUND* (nothing opened; the text says why: in use by another program, no USB camera, ...) or *CAMERA ERROR*
   (it opened but stopped delivering a picture). The same is in `curl localhost:5000/health` under `camera_status`. To see

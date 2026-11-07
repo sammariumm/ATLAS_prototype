@@ -110,13 +110,55 @@ EXPOSURE_STATE = {}
 _camera_lock = threading.Lock()  # cv2.VideoCapture is not thread-safe
 
 
+PICAM_NO_PICTURE = ("The Raspberry Pi camera is connected but sends no picture. Check that the ribbon cable is "
+                    "pushed in all the way at both ends (camera port, not DISPLAY), or try another cable.")
+_picam_call_lock = threading.Lock()
+_picam_stuck = None            # the worker of a Picamera2 call that timed out and has not returned yet
+
+
+def _picam_timeout():
+    """Seconds to wait for one picture from the Pi camera (a long exposure needs longer)."""
+    return max(5.0, 3.0 * max(EXPOSURE_US, 0) / 1e6 + 2.0)
+
+
+def _picam_call(fn, timeout=None):
+    """Runs a Picamera2 call that waits for the sensor (capture_array, capture_metadata) and raises TimeoutError if
+    no picture comes.  Without this a camera whose ribbon cable is loose blocks the call for ever and, at start-up,
+    the whole backend with it.  While a timed-out call is still waiting, further calls fail at once (so a stream does
+    not pile up threads); as soon as that call returns, because pictures flow again, the camera works again."""
+    global _picam_stuck
+    timeout = _picam_timeout() if timeout is None else timeout
+    with _picam_call_lock:
+        if _picam_stuck is not None:
+            if _picam_stuck.is_alive():
+                raise TimeoutError("the camera has not delivered a picture yet")
+            _picam_stuck = None
+        box = {}
+
+        def work():
+            try:
+                box["result"] = fn()
+            except BaseException as exc:            # handed to the caller below
+                box["error"] = exc
+
+        worker = threading.Thread(target=work, name="atlas-picamera-call", daemon=True)
+        worker.start()
+        worker.join(timeout)
+        if worker.is_alive():
+            _picam_stuck = worker
+            raise TimeoutError("no picture from the camera within %.0f s" % timeout)
+    if "error" in box:
+        raise box["error"]
+    return box["result"]
+
+
 def _lock_picamera_exposure():
     """Turn libcamera's auto-exposure OFF and pin exposure time + gain, so every film is photographed the same way."""
     global EXPOSURE_STATE
     try:
         if EXPOSURE_US <= 0 or ANALOGUE_GAIN <= 0:
             time.sleep(1.0)  # let auto-exposure settle once on the scene, then freeze what it chose
-        md = picam2.capture_metadata()
+        md = _picam_call(picam2.capture_metadata)
         exposure = EXPOSURE_US if EXPOSURE_US > 0 else int(md.get("ExposureTime", 10000))
         gain = ANALOGUE_GAIN if ANALOGUE_GAIN > 0 else float(md.get("AnalogueGain", 1.0))
         controls = {"AeEnable": False, "ExposureTime": exposure, "AnalogueGain": gain}
@@ -129,7 +171,7 @@ def _lock_picamera_exposure():
                 controls["ColourGains"] = (float(gains[0]), float(gains[1]))
         picam2.set_controls(controls)
         time.sleep(0.5)  # a few frames for the sensor to take the new values
-        md = picam2.capture_metadata()
+        md = _picam_call(picam2.capture_metadata)
         EXPOSURE_STATE = {"auto_exposure": False,
                           "exposure_us": md.get("ExposureTime"), "analogue_gain": md.get("AnalogueGain"),
                           "awb_locked": LOCK_AWB}
@@ -295,6 +337,14 @@ def _init_camera():
         USE_PICAMERA2 = True
         CAMERA_BACKEND = "picamera2"
         _camera_ok_detail = "Raspberry Pi camera (Picamera2), %dx%d" % tuple(CAMERA_SIZE)
+        try:
+            _picam_call(picam2.capture_metadata)          # wait for the first picture
+        except TimeoutError:
+            _set_camera_status("read_failed", PICAM_NO_PICTURE)
+            print(">>> The Raspberry Pi camera opened but sends no picture (libcamera: 'Camera frontend has timed "
+                  "out'). " + PICAM_NO_PICTURE + " The backend starts anyway; the live view shows this text. "
+                  "`rpicam-hello` shows the same fault if it is the hardware.", flush=True)
+            return
         _set_camera_status("ok", _camera_ok_detail)
         _lock_picamera_exposure()
         print("Camera backend: Picamera2 (libcamera / CSI Camera Module 2), size %s, rotation %d deg CCW"
@@ -334,7 +384,10 @@ def read_frame():
     """(ok, BGR frame) -- already rotated by ATLAS_CAMERA_ROTATION."""
     if USE_PICAMERA2:
         try:
-            frame = picam2.capture_array()
+            frame = _picam_call(picam2.capture_array)
+        except TimeoutError:
+            _set_camera_status("read_failed", PICAM_NO_PICTURE)
+            return False, None
         except Exception:
             print(">>> Picamera2 capture error:", file=sys.stderr, flush=True)
             traceback.print_exc()
