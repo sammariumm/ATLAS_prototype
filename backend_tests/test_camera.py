@@ -1,4 +1,5 @@
 """Camera detection and what the operator sees when there is no picture (no real camera is used: fakes only)."""
+import http.server
 import json
 import os
 import sys
@@ -53,6 +54,8 @@ def clean_camera(monkeypatch):
     monkeypatch.setattr(backend, "_picam_stuck", None)
     monkeypatch.setattr(backend, "CAMERA_BACKEND", "none")
     monkeypatch.setattr(backend, "CAMERA_INDEX", "")
+    monkeypatch.setattr(backend, "CAMERA_URL", "")
+    monkeypatch.setattr(backend, "_stream_retry_at", 0.0)
     monkeypatch.setattr(backend, "CAMERA_STATUS", {"state": "starting", "detail": ""})
     monkeypatch.setattr(backend, "_camera_ok_detail", "")
     monkeypatch.setattr(backend, "_lock_opencv_exposure", lambda: None)
@@ -414,3 +417,268 @@ def test_the_exposure_lock_still_works_through_the_guarded_calls(silent_pi, monk
     backend._init_camera()
     assert backend.CAMERA_STATUS["state"] == "ok"
     assert backend.EXPOSURE_STATE["auto_exposure"] is False and backend.EXPOSURE_STATE["exposure_us"] == 10000
+
+
+# ===================================================================== a network camera (a phone, an IP camera)
+URL = "http://192.168.43.1:8080/video"
+URL_WITH_SECRET = "http://admin:hunter2@192.168.43.1:8080/video?key=abc123"
+
+
+def _stream_cams(monkeypatch, **kw):
+    """cv2.VideoCapture for stream addresses: remembers what it was asked for, hands out FakeCaptures."""
+    made = []
+
+    def make(src, api=None, params=None):
+        made.append((src, api, params))
+        return FakeCapture(src, api, **kw)
+    monkeypatch.setattr(backend.cv2, "VideoCapture", make)
+    return made
+
+
+def _forbid_pi_and_usb(monkeypatch):
+    """With ATLAS_CAMERA_URL the Raspberry Pi camera and USB webcams must not even be looked at."""
+    fake = types.ModuleType("picamera2")
+
+    class Never:
+        def __init__(self):
+            raise AssertionError("Picamera2 must not be opened when ATLAS_CAMERA_URL is set")
+    fake.Picamera2 = Never
+    monkeypatch.setitem(sys.modules, "picamera2", fake)
+
+    def never():
+        raise AssertionError("USB cameras must not be scanned when ATLAS_CAMERA_URL is set")
+    monkeypatch.setattr(backend, "_linux_usb_webcams", never)
+
+
+def test_public_url_hides_credentials_and_query():
+    assert backend._public_url(URL_WITH_SECRET) == "http://192.168.43.1:8080/video"
+    assert backend._public_url("rtsp://u:p@cam.local/stream1") == "rtsp://cam.local/stream1"
+    assert backend._public_url("http://[fe80::1]:8080/video") == "http://[fe80::1]:8080/video"
+    assert backend._public_url("http://host:notaport/x") == "<invalid address>"
+
+
+def test_only_addresses_are_streams_not_devices():
+    assert backend._is_stream_url("http://x/y") and backend._is_stream_url("rtsp://x/y")
+    assert not backend._is_stream_url("/dev/video0") and not backend._is_stream_url(0)
+
+
+def test_a_network_camera_replaces_the_pi_camera_and_usb_webcams(monkeypatch):
+    monkeypatch.setattr(backend, "CAMERA_MODE", "auto")
+    monkeypatch.setattr(backend, "CAMERA_URL", URL_WITH_SECRET)
+    _forbid_pi_and_usb(monkeypatch)
+    made = _stream_cams(monkeypatch)
+    backend._init_camera()
+    st = backend.CAMERA_STATUS
+    assert st["state"] == "ok" and backend.CAMERA_BACKEND == "opencv" and not backend.USE_PICAMERA2
+    assert made and made[0][0] == URL_WITH_SECRET and made[0][1] == cv2.CAP_FFMPEG     # the real address is used ...
+    assert "Network camera http://192.168.43.1:8080/video" in st["detail"]               # ... but never shown
+    for shown in (st["detail"], json.dumps(backend.EXPOSURE_STATE)):
+        assert "hunter2" not in shown and "abc123" not in shown
+    backend.app.config["TESTING"] = True
+    health = backend.app.test_client().get("/health").get_data(as_text=True)
+    assert "hunter2" not in health and "abc123" not in health
+    ok, frame = backend.read_frame()
+    assert ok and frame.shape[2] == 3
+
+
+def test_an_opencv_without_the_parameter_list_still_opens_the_stream(monkeypatch):
+    monkeypatch.setattr(backend, "CAMERA_MODE", "auto")
+    monkeypatch.setattr(backend, "CAMERA_URL", URL)
+    monkeypatch.setattr(backend.cv2, "VideoCapture", lambda src, api=None: FakeCapture(src, api))   # 2 arguments only
+    backend._init_camera()
+    assert backend.CAMERA_STATUS["state"] == "ok"
+
+
+def test_an_unreachable_network_camera_says_what_to_check(monkeypatch):
+    monkeypatch.setattr(backend, "CAMERA_MODE", "auto")
+    monkeypatch.setattr(backend, "CAMERA_URL", URL_WITH_SECRET)
+    _forbid_pi_and_usb(monkeypatch)
+    _stream_cams(monkeypatch, opens=False)
+    backend._init_camera()
+    st = backend.CAMERA_STATUS
+    assert st["state"] == "not_found" and "cannot be opened" in st["detail"]
+    assert "same network" in st["detail"] and "hotspot" in st["detail"]
+    assert "hunter2" not in st["detail"] and backend.read_frame() == (False, None)
+
+
+def test_a_network_camera_that_never_answers_does_not_block_the_start(monkeypatch, stuck_driver):
+    monkeypatch.setattr(backend, "CAMERA_MODE", "auto")
+    monkeypatch.setattr(backend, "CAMERA_URL", URL)
+    monkeypatch.setattr(backend, "NETWORK_PROBE_TIMEOUT", 0.3)
+    monkeypatch.setattr(backend.cv2, "VideoCapture", lambda src, api=None, params=None: StuckCapture(src, api))
+    started = time.monotonic()
+    backend._init_camera()
+    assert time.monotonic() - started < 5
+    assert backend.CAMERA_STATUS["state"] == "not_found" and "does not answer within" in backend.CAMERA_STATUS["detail"]
+
+
+def test_a_dropped_stream_is_reopened_without_losing_the_picture(monkeypatch):
+    monkeypatch.setattr(backend, "CAMERA_MODE", "auto")
+    monkeypatch.setattr(backend, "CAMERA_URL", URL)
+    monkeypatch.setattr(backend, "NETWORK_RETRY_EVERY", 0.0)
+    made = _stream_cams(monkeypatch)
+    backend._init_camera()
+    first = backend.camera
+    assert backend.read_frame()[0] is True
+    first.left = 0                                                       # the phone's Wi-Fi drops
+    ok, frame = backend.read_frame()
+    assert ok and frame.shape[2] == 3                                    # reopened and read again in the same call
+    assert backend.camera is not first and len(made) == 2
+    assert backend.CAMERA_STATUS["state"] == "ok"
+
+
+def test_a_stream_that_cannot_be_reopened_is_reported(monkeypatch):
+    monkeypatch.setattr(backend, "CAMERA_MODE", "auto")
+    monkeypatch.setattr(backend, "CAMERA_URL", URL)
+    monkeypatch.setattr(backend, "NETWORK_RETRY_EVERY", 0.0)
+    state = {"up": True}
+
+    def make(src, api=None, params=None):
+        return FakeCapture(src, api, opens=state["up"])
+    monkeypatch.setattr(backend.cv2, "VideoCapture", make)
+    backend._init_camera()
+    state["up"] = False
+    backend.camera.left = 0
+    assert backend.read_frame() == (False, None)
+    assert backend.CAMERA_STATUS["state"] == "read_failed"
+
+
+def test_the_phone_may_start_after_the_pi(monkeypatch):
+    """The backend starts at boot, the phone's hotspot and camera app come later: the picture appears by itself."""
+    monkeypatch.setattr(backend, "CAMERA_MODE", "auto")
+    monkeypatch.setattr(backend, "CAMERA_URL", URL)
+    monkeypatch.setattr(backend, "NETWORK_RETRY_EVERY", 0.0)
+    state = {"up": False}
+    made = []
+
+    def make(src, api=None, params=None):
+        made.append(src)
+        return FakeCapture(src, api, opens=state["up"])
+    monkeypatch.setattr(backend.cv2, "VideoCapture", make)
+    backend._init_camera()
+    assert backend.CAMERA_STATUS["state"] == "not_found" and backend.camera is None
+    assert backend.read_frame() == (False, None)
+    assert backend.CAMERA_STATUS["state"] == "not_found"                 # still the explanation, not "read_failed"
+    state["up"] = True                                                   # hotspot + app are up now
+    ok, frame = backend.read_frame()
+    assert ok and frame.shape[2] == 3
+    assert backend.CAMERA_STATUS["state"] == "ok" and backend.CAMERA_BACKEND == "opencv" and backend.camera is not None
+
+
+def test_a_missing_phone_is_not_tried_on_every_picture(monkeypatch):
+    monkeypatch.setattr(backend, "CAMERA_MODE", "auto")
+    monkeypatch.setattr(backend, "CAMERA_URL", URL)
+    made = _stream_cams(monkeypatch, opens=False)
+    backend._init_camera()
+    n = len(made)
+    for _ in range(30):
+        assert backend.read_frame() == (False, None)
+    assert len(made) == n                                                # the next try is seconds away
+
+
+def test_reopening_is_not_tried_on_every_picture(monkeypatch):
+    monkeypatch.setattr(backend, "CAMERA_MODE", "auto")
+    monkeypatch.setattr(backend, "CAMERA_URL", URL)
+    made = _stream_cams(monkeypatch)
+    backend._init_camera()
+    backend.camera.left = 0
+    monkeypatch.setattr(backend, "_stream_retry_at", time.monotonic() + 60)     # tried a moment ago
+    for _ in range(20):
+        assert backend.read_frame() == (False, None)
+    assert len(made) == 1                                                # no hammering of a dead address
+
+
+def test_a_usb_webcam_is_never_reopened_by_the_stream_logic(monkeypatch):
+    monkeypatch.setattr(backend, "CAMERA_MODE", "auto")
+    _no_picamera(monkeypatch)
+    _usb_cameras(monkeypatch, "/dev/video0")
+    made = []
+    monkeypatch.setattr(backend.cv2, "VideoCapture", lambda src, api=None: made.append(src) or FakeCapture(src, api))
+    backend._init_camera()
+    backend.camera.left = 0
+    assert backend.read_frame() == (False, None) and made == ["/dev/video0"]
+
+
+# ---------------------------------------------------- the real thing: OpenCV reading a real MJPEG stream over HTTP
+class _PhoneStream:
+    """A tiny stand-in for a phone's camera app: serves a film photo as an MJPEG stream on 127.0.0.1."""
+
+    def __init__(self, photo):
+        ok, jpg = cv2.imencode(".jpg", photo, [int(cv2.IMWRITE_JPEG_QUALITY), 92])
+        body = jpg.tobytes()
+        stop = self.stop = threading.Event()
+
+        class Handler(http.server.BaseHTTPRequestHandler):
+            def log_message(self, *args):
+                pass
+
+            def do_GET(self):
+                self.send_response(200)
+                self.send_header("Content-Type", "multipart/x-mixed-replace; boundary=frame")
+                self.end_headers()
+                try:
+                    while not stop.is_set():
+                        self.wfile.write(b"--frame\r\nContent-Type: image/jpeg\r\nContent-Length: %d\r\n\r\n" % len(body))
+                        self.wfile.write(body + b"\r\n")
+                        time.sleep(0.04)
+                except (BrokenPipeError, ConnectionResetError, OSError):
+                    pass
+
+        self.server = http.server.ThreadingHTTPServer(("127.0.0.1", 0), Handler)
+        self.server.daemon_threads = True
+        threading.Thread(target=self.server.serve_forever, daemon=True).start()
+        self.port = self.server.server_address[1]
+
+    def close(self):
+        self.stop.set()
+        self.server.shutdown()
+        self.server.server_close()
+
+
+@pytest.fixture()
+def phone(monkeypatch):
+    import synth
+    if "FFMPEG" not in cv2.getBuildInformation():
+        pytest.skip("this OpenCV build cannot read network streams")
+    stream = _PhoneStream(synth.make_film_photo(synth.make_digital()))
+    monkeypatch.setattr(backend, "CAMERA_ROTATION", 0)                   # the stand-in photo is portrait already
+    yield stream
+    stream.close()
+
+
+def test_a_real_mjpeg_stream_gives_live_view_and_a_film_capture(phone, tmp_path, monkeypatch):
+    monkeypatch.setattr(backend, "CAMERA_MODE", "auto")
+    monkeypatch.setattr(backend, "CAMERA_URL", f"http://phone:pw123@127.0.0.1:{phone.port}/video?k=1")
+    monkeypatch.setattr(backend, "SAVE_DIR", str(tmp_path / "scans"))
+    backend.app.config["TESTING"] = True
+    backend._init_camera()
+    st = backend.CAMERA_STATUS
+    assert st["state"] == "ok", st
+    assert f"127.0.0.1:{phone.port}/video" in st["detail"] and "pw123" not in st["detail"]
+    # the live view is a real picture of the stream
+    frame = _text_of(next(backend.generate_frames()))
+    assert frame.shape[:2] == (1640, 1232) or max(frame.shape[:2]) == backend.PREVIEW_MAX_SIDE
+    # a capture goes through the film processing exactly like a Pi camera shot
+    client = backend.app.test_client()
+    r = client.post("/capture", data=json.dumps({"scan_id": "PHONE1", "side": "Left", "view": "CC"}),
+                    content_type="application/json")
+    j = r.get_json()
+    assert r.status_code == 200 and j["status"] == "success" and j["source"] == "camera", j
+    img = cv2.imread(j["image_path"], cv2.IMREAD_UNCHANGED)
+    assert img.dtype == np.uint16 and img.max() > 0 and j["quality"]["usable"]
+    assert os.path.isfile(j["raw_path"]) and os.path.isfile(j["preview_path"])
+
+
+def test_a_real_stream_that_goes_away_is_reported_and_comes_back(phone, monkeypatch):
+    monkeypatch.setattr(backend, "CAMERA_MODE", "auto")
+    monkeypatch.setattr(backend, "CAMERA_URL", f"http://127.0.0.1:{phone.port}/video")
+    monkeypatch.setattr(backend, "NETWORK_RETRY_EVERY", 0.0)
+    backend._init_camera()
+    assert backend.CAMERA_STATUS["state"] == "ok"
+    phone.stop.set()                                                     # the phone's app is stopped
+    deadline, failed = time.monotonic() + 30, False
+    while time.monotonic() < deadline:
+        if backend.read_frame() == (False, None):
+            failed = True
+            break
+    assert failed and backend.CAMERA_STATUS["state"] == "read_failed"

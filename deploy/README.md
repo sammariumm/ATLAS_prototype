@@ -228,6 +228,24 @@ The file type is recognised from its content, not its extension. The converted P
   (it opened but stopped delivering a picture). The same is in `curl localhost:5000/health` under `camera_status`. To see
   the stream without the app, open `http://127.0.0.1:5000/video_feed` in a browser. On Linux check `ls -l /dev/video*`
   (USB cameras) and that your user is in the `video` group.
+* **No Pi camera? Use a phone (or a USB webcam).** A USB webcam needs nothing: plug it in, start the backend without
+  `ATLAS_CAMERA=none`, and it is found automatically. A phone works as a network camera:
+  1. *Phone:* install a camera app that serves a video stream (on Android, "IP Webcam" is one). In the app set the
+     highest resolution you can, **lock the exposure and the white balance**, switch the flash off, and start the
+     server. The app shows its address, e.g. `http://192.168.43.1:8080`; the video stream is that address plus
+     `/video`. Keep the phone on a charger, on a steady mount above the lightbox.
+  2. *Network:* switch on the phone's **hotspot** and connect the Pi to it (Wi-Fi icon on the Pi's desktop). The Pi
+     needs no internet for this. At the presentation use the phone's own hotspot, not the venue's Wi-Fi.
+  3. *Check from the Pi:* open `http://<phone-ip>:8080` in the Pi's browser; you should see the phone's page.
+  4. *Tell the backend:* `sudo systemctl edit atlas-backend.service` and add
+     `[Service]` / `Environment=ATLAS_CAMERA_URL=http://<phone-ip>:8080/video` (and remove `ATLAS_CAMERA=none` if it
+     is there), then `sudo systemctl restart atlas-backend.service`. By hand instead: stop the service, then
+     `ATLAS_CAMERA_URL=http://<phone-ip>:8080/video python3 app.py`.
+  5. *Orientation:* look at `http://127.0.0.1:5000/video_feed` on the Pi. The film must stand upright (portrait). If
+     it is sideways or upside down, set `ATLAS_CAMERA_ROTATION` to `0`, `90`, `180` or `270` (counter-clockwise).
+  The backend does not need the phone to be there when it starts: it keeps trying every few seconds and the live
+  view appears by itself, and it reconnects if the stream drops. The address is never shown with a password in it.
+  Not tested with a real phone app yet: try it before you rely on it.
 * The picture is rotated by `ATLAS_CAMERA_ROTATION` degrees counter-clockwise (default **90**) before anything else
   sees it, so the live preview and the saved photo have the same orientation. If the film comes out sideways or
   upside down, set the value to `270` (or `0` / `180`).
@@ -261,6 +279,7 @@ The file type is recognised from its content, not its extension. The converted P
 |---|---|---|
 | `ATLAS_CAMERA` | `auto` | `none` = do not open a camera (softcopy-only machine; the live view then says CAMERA OFF) |
 | `ATLAS_CAMERA_INDEX` | first that works | USB webcam to use: a number or a device path such as `/dev/video2` |
+| `ATLAS_CAMERA_URL` | – | video stream of a network camera, e.g. a phone: `http://<phone-ip>:8080/video`. Replaces the Pi camera and USB webcams (see "No Pi camera? Use a phone") |
 | `ATLAS_CAMERA_SIZE` | `1640x1232` | camera resolution (the Camera Module 2's full-field 4:3 mode) |
 | `ATLAS_CAMERA_ROTATION` | `90` | degrees counter-clockwise: `0`, `90`, `180`, `270` |
 | `ATLAS_EXPOSURE_US` | `0` | exposure time in microseconds; `0` = freeze what auto-exposure chose at start-up |
