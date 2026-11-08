@@ -7,6 +7,7 @@ import textwrap
 import time
 import threading
 import traceback
+from urllib.parse import urlsplit, urlunsplit
 
 import cv2
 import numpy as np
@@ -58,6 +59,9 @@ CAMERA_MODE = os.environ.get("ATLAS_CAMERA", "auto").strip().lower()
 # USB webcam (a PC, or a Pi without the CSI camera): "" = use the first /dev/video* that gives a picture,
 # or a number (0, 1, ...) or a device path (/dev/video2) to force one.
 CAMERA_INDEX = os.environ.get("ATLAS_CAMERA_INDEX", "").strip()
+# A network camera (a phone running a camera app, an IP camera): the address of its video stream, for example
+# http://192.168.43.1:8080/video .  When set, the Raspberry Pi camera and USB webcams are not used at all.
+CAMERA_URL = os.environ.get("ATLAS_CAMERA_URL", "").strip()
 
 # Camera size.  1640x1232 is the Camera Module 2's full-field-of-view 2x2-binned mode (4:3).  The old 1280x720
 # is a cropped 16:9 mode, which loses field of view and resolution for a portrait film.
@@ -210,7 +214,36 @@ def _set_camera_status(state, detail):
     CAMERA_STATUS["state"], CAMERA_STATUS["detail"] = state, detail
 
 
-WEBCAM_PROBE_TIMEOUT = 6.0   # seconds a webcam may take to deliver its first picture before it is given up
+WEBCAM_PROBE_TIMEOUT = 6.0     # seconds a webcam may take to deliver its first picture before it is given up
+NETWORK_PROBE_TIMEOUT = 15.0   # the same for a network camera at start-up (Wi-Fi, name lookup, app start)
+NETWORK_RETRY_TIMEOUT = 4.0    # ... and for each try to get a dropped network stream back
+NETWORK_RETRY_EVERY = 5.0      # seconds between those tries
+
+
+def _is_stream_url(source):
+    return isinstance(source, str) and re.match(r"^[A-Za-z][A-Za-z0-9+.-]*://", source) is not None
+
+
+def _public_url(url):
+    """The address without user name, password or query: those must not end up in the log, /health or the picture."""
+    try:
+        parts = urlsplit(url)
+        host = parts.hostname or ""
+        if ":" in host:
+            host = "[" + host + "]"
+        netloc = host + (":%d" % parts.port if parts.port else "")
+        return urlunsplit((parts.scheme, netloc, parts.path, "", ""))
+    except ValueError:
+        return "<invalid address>"
+
+
+def _open_stream(url):
+    """cv2.VideoCapture for a network stream, with time limits so that a dead stream cannot block a read for ever."""
+    try:
+        return cv2.VideoCapture(url, cv2.CAP_FFMPEG,
+                                [cv2.CAP_PROP_OPEN_TIMEOUT_MSEC, 8000, cv2.CAP_PROP_READ_TIMEOUT_MSEC, 8000])
+    except (TypeError, AttributeError, cv2.error):       # an OpenCV without the parameter list
+        return cv2.VideoCapture(url, cv2.CAP_FFMPEG)
 
 
 def _linux_usb_webcams():
@@ -241,16 +274,21 @@ def _webcam_candidates():
     return [0, 1, 2]
 
 
-def _probe_webcam(source, backend):
-    """(VideoCapture or None, problem).  Opens `source` and reads a picture; never takes longer than
-    WEBCAM_PROBE_TIMEOUT (a stuck driver is abandoned, not waited for)."""
+def _probe_webcam(source, backend, timeout=None):
+    """(VideoCapture or None, problem).  Opens `source` (a device or a stream address) and reads a picture; never takes
+    longer than the time limit (a stuck driver or a dead stream is abandoned, not waited for)."""
+    network = _is_stream_url(source)
+    label = _public_url(source) if network else source
+    if timeout is None:
+        timeout = NETWORK_PROBE_TIMEOUT if network else WEBCAM_PROBE_TIMEOUT
     box = {}
 
     def work():
-        cap = cv2.VideoCapture(source, backend)
+        cap = _open_stream(source) if network else cv2.VideoCapture(source, backend)
         box["cap"] = cap
         if not cap.isOpened():
-            box["problem"] = (f"{source} cannot be opened (in use by another program, or no permission: "
+            box["problem"] = (f"{label} cannot be opened" if network else
+                              f"{label} cannot be opened (in use by another program, or no permission: "
                               f"is your user in the 'video' group?)")
             return
         for _ in range(8):
@@ -258,26 +296,35 @@ def _probe_webcam(source, backend):
             if ok and frame is not None and frame.size:
                 box["ok"] = True
                 return
-        box["problem"] = f"{source} opens but delivers no picture"
+        box["problem"] = f"{label} opens but delivers no picture"
 
     worker = threading.Thread(target=work, name="atlas-webcam-probe", daemon=True)
     worker.start()
-    worker.join(WEBCAM_PROBE_TIMEOUT)
+    worker.join(timeout)
     if worker.is_alive():
-        return None, f"{source} does not answer (stuck driver, or in use by another program)"
+        return None, (f"{label} does not answer within {timeout:.0f} s" if network else
+                      f"{label} does not answer (stuck driver, or in use by another program)")
     cap = box.get("cap")
     if box.get("ok"):
         return cap, None
     if cap is not None:
         cap.release()
-    return None, box.get("problem", f"{source} gave no picture")
+    return None, box.get("problem", f"{label} gave no picture")
 
 
-def _open_webcam():
-    """Opens the first webcam that really delivers a picture.  Returns (VideoCapture or None, text).
+def _open_webcam(url=None, timeout=None):
+    """Opens a camera that really delivers a picture.  Returns (VideoCapture or None, text).
 
-    A /dev/video node can exist and even open and still never deliver a frame, so a camera only counts when a
-    frame was read from it."""
+    With `url`: that network stream.  Otherwise the first USB webcam that works.  A /dev/video node can exist and
+    even open and still never deliver a frame, so a camera only counts when a frame was read from it."""
+    if url:
+        cap, problem = _probe_webcam(url, cv2.CAP_FFMPEG, timeout)
+        if cap is None:
+            return None, ("Network camera " + problem + ". Check that the camera app on the phone is running and "
+                          "streaming, that the phone and the Pi are on the same network (for example the Pi "
+                          "connected to the phone's hotspot) and that the address is right.")
+        w, h = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH)), int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
+        return cap, f"Network camera {_public_url(url)}, {w}x{h}"
     candidates = _webcam_candidates()
     if not candidates:
         return None, ("No USB camera found (on Linux `ls /dev/video*` and `v4l2-ctl --list-devices` show what the "
@@ -296,9 +343,38 @@ def _open_webcam():
     return None, "Tried: " + "; ".join(problems) + "."
 
 
-def _init_webcam(picamera_problem=None):
-    global camera, CAMERA_BACKEND, _camera_ok_detail
-    cap, text = _open_webcam()
+_stream_retry_at = 0.0
+
+
+def _reconnect_stream():
+    """Network camera only: (re)open the stream when it dropped (Wi-Fi hiccup, phone screen locked) or was not there
+    yet (the Pi started before the phone's hotspot).  Tries at most every few seconds.  The caller holds
+    _camera_lock, because this swaps `camera`.  Returns True when the stream is open again."""
+    global camera, CAMERA_BACKEND, _camera_ok_detail, EXPOSURE_STATE, _stream_retry_at
+    if not CAMERA_URL or time.monotonic() < _stream_retry_at:
+        return False
+    cap, text = _open_webcam(CAMERA_URL, NETWORK_RETRY_TIMEOUT)
+    _stream_retry_at = time.monotonic() + NETWORK_RETRY_EVERY
+    if cap is None:
+        return False
+    old, camera = camera, cap
+    if old is not None:
+        try:
+            old.release()
+        except Exception:
+            pass
+    CAMERA_BACKEND, _camera_ok_detail = "opencv", text
+    EXPOSURE_STATE = {"auto_exposure": "set in the camera app on the phone"}
+    _set_camera_status("ok", text)
+    print(">>> Network camera connected: " + text, flush=True)
+    return True
+
+
+def _init_webcam(picamera_problem=None, url=None):
+    global camera, CAMERA_BACKEND, _camera_ok_detail, EXPOSURE_STATE, _stream_retry_at
+    cap, text = _open_webcam(url)
+    if url:
+        _stream_retry_at = time.monotonic() + NETWORK_RETRY_EVERY
     if cap is None:
         message = text
         if picamera_problem:
@@ -308,7 +384,10 @@ def _init_webcam(picamera_problem=None):
         return
     camera, CAMERA_BACKEND, _camera_ok_detail = cap, "opencv", text
     _set_camera_status("ok", text)
-    _lock_opencv_exposure()
+    if url:
+        EXPOSURE_STATE = {"auto_exposure": "set in the camera app on the phone"}
+    else:
+        _lock_opencv_exposure()
     print("Camera backend: OpenCV VideoCapture (" + text + ")", flush=True)
 
 
@@ -318,6 +397,11 @@ def _init_camera():
         _set_camera_status("off", "The camera is switched off (ATLAS_CAMERA=none: softcopy only). "
                                   "Start the backend without that setting to use a camera.")
         print(">>> ATLAS_CAMERA=none: no camera opened (softcopy only).", flush=True)
+        return
+    if CAMERA_URL:
+        print(">>> ATLAS_CAMERA_URL is set: using the network camera %s (the Raspberry Pi camera and USB webcams "
+              "are not used)." % _public_url(CAMERA_URL), flush=True)
+        _init_webcam(url=CAMERA_URL)
         return
     print(">>> Initializing camera backend...", flush=True)
     try:
@@ -394,12 +478,15 @@ def read_frame():
             _set_camera_status("read_failed", "The camera was opened but gives no picture "
                                               "(cable, power, or another program is using it).")
             return False, None
-    elif camera is not None:
+    elif camera is not None or CAMERA_URL:
         with _camera_lock:
-            ok, frame = camera.read()
+            ok, frame = camera.read() if camera is not None else (False, None)
+            if not ok and CAMERA_URL and _reconnect_stream():
+                ok, frame = camera.read()
         if not ok:
-            _set_camera_status("read_failed", "The camera was opened but gives no picture "
-                                              "(unplugged, or another program is using it).")
+            if camera is not None:               # (a network camera that never connected keeps its own explanation)
+                _set_camera_status("read_failed", "The camera was opened but gives no picture "
+                                                  "(unplugged, or another program is using it).")
             return False, None
     else:
         return False, None
